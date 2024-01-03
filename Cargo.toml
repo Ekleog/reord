@@ -2,6 +2,13 @@
 name = "reord"
 version = "0.1.0"
 edition = "2021"
+readme = "README.md"
+documentation = "https://docs.rs/reord"
+description = "Utility crate to test for race conditions and proper locking in async code"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Ekleog/reord"
+keywords = ["async", "testing", "fuzz", "utility", "test"]
+categories = ["asynchronous", "concurrency", "development-tools"]
 
 [features]
 test = []
