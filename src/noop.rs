@@ -18,13 +18,15 @@ pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
     f.await
 }
 
-/// Run the test
+/// Start the test once `tasks` tasks are ready for execution
 ///
-/// This should be called after at least one task has been spawned on the executor, wrapped by `new_task`.
-/// This will start executing tasks in a random but reproducible order.
-/// It will also wait until the tasks have all finished executing.
+/// This should be called after at least `tasks` tasks have been spawned on the executor,
+/// wrapped by `new_task`.
+///
+/// This will start executing the tasks in a random but reproducible order, and then return
+/// as soon as the `tasks` tasks have started executing.
 #[inline]
-pub async fn run() {}
+pub async fn start(tasks: usize) {}
 
 /// Execution order randomization point
 ///

@@ -33,6 +33,7 @@ impl Config {
     }
 }
 
+#[derive(Debug)]
 struct StopPoint {
     resume: oneshot::Sender<()>,
     lock_about_to_be_acquired: Option<LockData>,
@@ -47,34 +48,78 @@ impl StopPoint {
     }
 }
 
+#[derive(Debug)]
 enum Message {
     NewTask(StopPoint),
     Start,
     Stop(StopPoint),
     Unlock(LockData),
+    TaskEnd,
 }
 
 static SENDER: OnceLock<mpsc::UnboundedSender<Message>> = OnceLock::new();
-static OVERSEER: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
+static OVERSEER: Mutex<Option<(Config, mpsc::UnboundedReceiver<Message>)>> = Mutex::new(None);
 
 pub async fn init_test(cfg: Config) {
     eprintln!("Running `reord` test with random seed {:?}", cfg.seed);
 
-    let mut rng = rand::rngs::StdRng::from_seed(cfg.seed);
-
-    let (s, mut receiver) = mpsc::unbounded_channel();
+    let (s, r) = mpsc::unbounded_channel();
     SENDER.set(s)
         .expect("The test was already initialized! Note that `reord` is only designed to work with `cargo-nextest`.");
 
-    let overseer = tokio::task::spawn(async move {
+    assert!(OVERSEER.lock().unwrap().replace((cfg, r)).is_none());
+}
+
+pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
+    let sender = SENDER
+        .get()
+        .expect("Called `new_task` without `init_test` being run before.");
+
+    let (s, r) = oneshot::channel();
+    sender
+        .send(Message::NewTask(StopPoint::without_lock(s)))
+        .expect("submitting credentials to run");
+    r.await.expect("waiting for authorization to run");
+    let res = f.await;
+    sender.send(Message::TaskEnd).expect("submitting task end");
+    res
+}
+
+pub async fn start(tasks: usize) {
+    let (cfg, mut receiver) = OVERSEER.lock().unwrap().take().unwrap();
+
+    let mut new_tasks = Vec::with_capacity(tasks);
+    for _ in 0..tasks {
+        match receiver.recv().await.unwrap() {
+            Message::NewTask(s) => new_tasks.push(s),
+            m => {
+                panic!("Got unexpected message {m:?} before {tasks} tasks were ready for execution")
+            }
+        }
+    }
+
+    let sender = SENDER
+        .get()
+        .expect("Called `start` without `init_test` having run before.");
+    for s in new_tasks {
+        sender
+            .send(Message::NewTask(s))
+            .expect("re-submitting the new tasks message");
+    }
+    sender
+        .send(Message::Start)
+        .expect("submitting start message");
+
+    let mut rng = rand::rngs::StdRng::from_seed(cfg.seed);
+    tokio::task::spawn(async move {
         let mut locks = HashSet::<LockData>::new();
         let mut pending_stops = Vec::<StopPoint>::new();
         let mut blocked_task_waiting_on = None;
         let mut skip_next_resume = false;
         while let Some(m) = receiver.recv().await {
-            let should_resume = matches!(m, Message::Stop(_) | Message::Start);
+            let should_resume = matches!(m, Message::Stop(_) | Message::Start | Message::TaskEnd);
             match m {
-                Message::Start => (),
+                Message::Start | Message::TaskEnd => (),
                 Message::Unlock(l) => {
                     locks.remove(&l);
                     if blocked_task_waiting_on == Some(l) {
@@ -124,32 +169,6 @@ pub async fn init_test(cfg: Config) {
             }
         }
     });
-
-    assert!(OVERSEER.lock().unwrap().replace(overseer).is_none());
-}
-
-pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
-    let sender = SENDER
-        .get()
-        .expect("Called `new_task` without `init_test` being run before.");
-
-    let (s, r) = oneshot::channel();
-    sender
-        .send(Message::NewTask(StopPoint::without_lock(s)))
-        .expect("submitting credentials to run");
-    r.await.expect("waiting for authorization to run");
-    f.await
-}
-
-pub async fn run() {
-    SENDER
-        .get()
-        .expect("Called `start` without `init_test` having run before.")
-        .send(Message::Start)
-        .expect("submitting start message");
-
-    let overseer = OVERSEER.lock().unwrap().take().unwrap();
-    overseer.await.expect("Failed running overseer task");
 }
 
 pub async fn point() {
