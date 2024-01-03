@@ -79,13 +79,14 @@ pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
     sender
         .send(Message::NewTask(StopPoint::without_lock(s)))
         .expect("submitting credentials to run");
-    r.await.expect("waiting for authorization to run");
+    r.await
+        .expect("Overseer died, please check other panic messages");
     let res = f.await;
     sender.send(Message::TaskEnd).expect("submitting task end");
     res
 }
 
-pub async fn start(tasks: usize) {
+pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
     let (cfg, mut receiver) = OVERSEER.lock().unwrap().take().unwrap();
 
     let mut new_tasks = Vec::with_capacity(tasks);
@@ -168,7 +169,7 @@ pub async fn start(tasks: usize) {
                 }
             }
         }
-    });
+    })
 }
 
 pub async fn point() {
@@ -179,7 +180,8 @@ pub async fn point() {
     sender
         .send(Message::Stop(StopPoint::without_lock(s)))
         .expect("submitting stop point");
-    r.await.expect("waiting for auth to run");
+    r.await
+        .expect("Overseer died, please check other panic messages");
 }
 
 #[derive(Debug)]
@@ -209,17 +211,15 @@ impl Lock {
                 lock_about_to_be_acquired: Some(l.clone()),
             }))
             .expect("sending stop point");
-        wait.await.expect("waiting for authorization to run");
+        wait.await
+            .expect("Overseer died, please check other panic messages");
         Lock(l)
     }
 }
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        SENDER
-            .get()
-            .unwrap()
-            .send(Message::Unlock(self.0.clone()))
-            .expect("unlocking {self:?}");
+        // Avoid double-panic on lock failures.
+        let _ = SENDER.get().unwrap().send(Message::Unlock(self.0.clone()));
     }
 }

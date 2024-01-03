@@ -5,6 +5,7 @@ pkgs.stdenv.mkDerivation {
   name = "reord";
   buildInputs = (
     (with pkgs; [
+      cargo-nextest
       niv
 
       (fenix.combine (with fenix; [

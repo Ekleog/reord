@@ -25,8 +25,13 @@ pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
 ///
 /// This will start executing the tasks in a random but reproducible order, and then return
 /// as soon as the `tasks` tasks have started executing.
+///
+/// This returns a `JoinHandle`, that you should join if you want to catch panics related to
+/// lock handling.
 #[inline]
-pub async fn start(tasks: usize) {}
+pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
+    panic!("Trying to start a `reord` test, but the `test` feature is not set");
+}
 
 /// Execution order randomization point
 ///
