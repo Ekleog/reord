@@ -124,6 +124,7 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
                 Message::Unlock(l) => {
                     locks.remove(&l);
                     if blocked_task_waiting_on == Some(l) {
+                        blocked_task_waiting_on = None;
                         skip_next_resume = true;
                     }
                 }
@@ -166,6 +167,7 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
                         Err(_) => (),
                     }
                     blocked_task_waiting_on = Some(lock);
+                    SENDER.get().unwrap().send(Message::Start).unwrap();
                 }
             }
         }
