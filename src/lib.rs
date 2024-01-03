@@ -1,18 +1,9 @@
 #![doc = include_str!("../README.md")]
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 #[cfg(any(test, feature = "test"))]
 mod real;
-
-#[cfg(any(test, feature = "test"))]
-pub use real::*;
-
-#[allow(dead_code)] // dead code when in cfg(test)
-mod noop;
-
-#[cfg(not(any(test, feature = "test")))]
-pub use noop::*;
 
 /// Configuration for a `reord`-based test
 #[derive(Debug)]
@@ -61,6 +52,110 @@ impl Config {
 
 #[cfg(all(test, not(feature = "test")))]
 const _: () = panic!("Trying to test `reord` without its `test` feature");
+
+/// Start a test
+///
+/// Note that this relies on global variables for convenience, and thus should only ever be used with
+/// `cargo-nextest`.
+#[inline]
+#[allow(unused_variables)]
+pub async fn init_test(config: Config) {
+    #[cfg(any(test, feature = "test"))]
+    real::init_test(config).await
+}
+
+/// Add a task to the `reord` framework
+///
+/// This should be used around all the futures spawned by the test
+#[inline]
+pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
+    #[cfg(any(test, feature = "test"))]
+    let res = real::new_task(f).await;
+    #[cfg(not(any(test, feature = "test")))]
+    let res = f.await;
+    res
+}
+
+/// Start the test once `tasks` tasks are ready for execution
+///
+/// This should be called after at least `tasks` tasks have been spawned on the executor,
+/// wrapped by `new_task`.
+///
+/// This will start executing the tasks in a random but reproducible order, and then return
+/// as soon as the `tasks` tasks have started executing.
+///
+/// This returns a `JoinHandle`, that you should join if you want to catch panics related to
+/// lock handling.
+#[inline]
+#[allow(unused_variables)]
+pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
+    #[cfg(not(any(test, feature = "test")))]
+    panic!("Trying to start a `reord` test, but the `test` feature is not set");
+    #[cfg(any(test, feature = "test"))]
+    real::start(tasks).await
+}
+
+/// Execution order randomization point
+///
+/// Reaching this point makes `reord` able to switch the execution to another thread.
+#[inline]
+pub async fn point() {
+    #[cfg(any(test, feature = "test"))]
+    real::point().await
+}
+
+/// Lock handling
+///
+/// This records, for `reord`, which locks are currently taken by the program. The lock should be acquired
+/// as close as possible before the real lock acquiring, and released as soon as possible after the real
+/// lock release.
+///
+/// In addition, there should be a `reord::point().await` just after the real lock managed to be acquired,
+/// and one ideally just after the real lock was released, though this may be harder due to early returns
+/// and the current absence of `async Drop`.
+///
+/// If too long passes with `reord` unaware of the state of your locks, you could end up with
+/// non-reproducible behavior, due to two execution threads actually running in parallel on your executor.
+#[derive(Debug)]
+pub struct Lock {
+    #[cfg(any(test, feature = "test"))]
+    _data: real::Lock,
+    #[cfg(not(any(test, feature = "test")))]
+    _unused: (),
+}
+
+impl Lock {
+    /// Take a lock with a given name
+    #[inline]
+    #[allow(unused_variables)]
+    pub async fn take_named(name: String) -> Lock {
+        #[cfg(any(test, feature = "test"))]
+        let res = Lock {
+            _data: real::Lock::take_named(name).await,
+        };
+        #[cfg(not(any(test, feature = "test")))]
+        let res = Lock { _unused: () };
+        res
+    }
+
+    /// Take a lock at a given address
+    #[inline]
+    #[allow(unused_variables)]
+    pub async fn take_addressed(address: usize) -> Lock {
+        #[cfg(any(test, feature = "test"))]
+        let res = Lock {
+            _data: real::Lock::take_addressed(address).await,
+        };
+        #[cfg(not(any(test, feature = "test")))]
+        let res = Lock { _unused: () };
+        res
+    }
+}
+
+impl Drop for Lock {
+    #[inline]
+    fn drop(&mut self) {}
+}
 
 #[cfg(test)]
 mod tests;

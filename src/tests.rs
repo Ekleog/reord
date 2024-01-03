@@ -27,7 +27,7 @@ async fn basic_working_test() {
 }
 
 #[tokio::test]
-async fn check_locks() {
+async fn check_failing_locks() {
     reord::init_test(reord::Config {
         check_named_locks_work_for: Some(Duration::from_secs(1)),
         ..reord::Config::from_seed(Default::default())
