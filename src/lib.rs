@@ -61,3 +61,6 @@ impl Config {
 
 #[cfg(all(test, not(feature = "test")))]
 const _: () = panic!("Trying to test `reord` without its `test` feature");
+
+#[cfg(test)]
+mod tests;
