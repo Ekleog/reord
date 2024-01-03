@@ -1,14 +1,20 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
+use std::time::Duration;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod real;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+#[cfg(test)]
+pub use real::*;
+
+#[allow(dead_code)] // dead code when in cfg(test)
+mod noop;
+
+#[cfg(not(test))]
+pub use noop::*;
+
+#[derive(Debug)]
+pub struct Config {
+    pub seed: [u8; 32],
+    pub check_named_locks_work_for: Option<Duration>,
+    pub check_addressed_locks_work_for: Option<Duration>,
 }
