@@ -1,6 +1,11 @@
 use crate::Config;
 use rand::{seq::SliceRandom, SeedableRng};
-use std::{collections::HashSet, future::Future, sync::OnceLock, time::Duration};
+use std::{
+    collections::HashSet,
+    future::Future,
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
 use tokio::sync::{mpsc, oneshot};
 
 impl Config {
@@ -50,6 +55,7 @@ enum Message {
 }
 
 static SENDER: OnceLock<mpsc::UnboundedSender<Message>> = OnceLock::new();
+static OVERSEER: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
 
 pub async fn init_test(cfg: Config) {
     eprintln!("Running `reord` test with random seed {:?}", cfg.seed);
@@ -60,7 +66,7 @@ pub async fn init_test(cfg: Config) {
     SENDER.set(s)
         .expect("The test was already initialized! Note that `reord` is only designed to work with `cargo-nextest`.");
 
-    tokio::task::spawn(async move {
+    let overseer = tokio::task::spawn(async move {
         let mut locks = HashSet::<LockData>::new();
         let mut pending_stops = Vec::<StopPoint>::new();
         let mut blocked_task_waiting_on = None;
@@ -118,6 +124,8 @@ pub async fn init_test(cfg: Config) {
             }
         }
     });
+
+    assert!(OVERSEER.lock().unwrap().replace(overseer).is_none());
 }
 
 pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
@@ -139,6 +147,9 @@ pub async fn run() {
         .expect("Called `start` without `init_test` having run before.")
         .send(Message::Start)
         .expect("submitting start message");
+
+    let overseer = OVERSEER.lock().unwrap().take().unwrap();
+    overseer.await.expect("Failed running overseer task");
 }
 
 pub async fn point() {
