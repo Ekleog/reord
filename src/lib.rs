@@ -2,20 +2,21 @@
 
 use std::time::Duration;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 mod real;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 pub use real::*;
 
 #[allow(dead_code)] // dead code when in cfg(test)
 mod noop;
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test")))]
 pub use noop::*;
 
 /// Configuration for a `reord`-based test
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Config {
     /// The random seed used to choose which task to run
     ///
@@ -36,3 +37,27 @@ pub struct Config {
     /// locking worked properly and continue testing.
     pub check_addressed_locks_work_for: Option<Duration>,
 }
+
+impl Config {
+    /// Generate a configuration with the default parameters and a random seed
+    pub fn with_random_seed() -> Config {
+        use rand::Rng;
+        Config {
+            seed: rand::thread_rng().gen(),
+            check_addressed_locks_work_for: None,
+            check_named_locks_work_for: None,
+        }
+    }
+
+    /// Generate a configuration with the default parameters from a given seed
+    pub fn from_seed(seed: [u8; 32]) -> Config {
+        Config {
+            seed,
+            check_addressed_locks_work_for: None,
+            check_named_locks_work_for: None,
+        }
+    }
+}
+
+#[cfg(all(test, not(feature = "test")))]
+const _: () = panic!("Trying to test `reord` without its `test` feature");

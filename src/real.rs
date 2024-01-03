@@ -52,6 +52,8 @@ enum Message {
 static SENDER: OnceLock<mpsc::UnboundedSender<Message>> = OnceLock::new();
 
 pub async fn init_test(cfg: Config) {
+    eprintln!("Running `reord` test with random seed {:?}", cfg.seed);
+
     let mut rng = rand::rngs::StdRng::from_seed(cfg.seed);
 
     let (s, mut receiver) = mpsc::unbounded_channel();
@@ -115,9 +117,7 @@ pub async fn init_test(cfg: Config) {
                 }
             }
         }
-    })
-    .await
-    .expect("Failed spawning the `reord` manager");
+    });
 }
 
 pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
@@ -133,7 +133,7 @@ pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
     f.await
 }
 
-pub async fn start() {
+pub async fn run() {
     SENDER
         .get()
         .expect("Called `start` without `init_test` having run before.")

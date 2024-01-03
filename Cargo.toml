@@ -3,6 +3,12 @@ name = "reord"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+test = []
+
 [dependencies]
 rand = "0.8.5"
 tokio = { version = "1.35", features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1.35", features = ["macros"] }
