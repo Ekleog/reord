@@ -71,9 +71,9 @@ pub async fn init_test(cfg: Config) {
 }
 
 pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
-    let sender = SENDER
-        .get()
-        .expect("Called `new_task` without `init_test` being run before.");
+    let Some(sender) = SENDER.get() else {
+        return f.await;
+    };
 
     let (s, r) = oneshot::channel();
     sender
@@ -175,9 +175,9 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
 }
 
 pub async fn point() {
-    let sender = SENDER
-        .get()
-        .expect("Called `new_task` without `init_test` being run before.");
+    let Some(sender) = SENDER.get() else {
+        return;
+    };
     let (s, r) = oneshot::channel();
     sender
         .send(Message::Stop(StopPoint::without_lock(s)))
@@ -196,18 +196,22 @@ enum LockData {
 }
 
 impl Lock {
+    #[inline]
     pub async fn take_named(s: String) -> Lock {
         Self::take(LockData::Named(s)).await
     }
+
+    #[inline]
     pub async fn take_addressed(a: usize) -> Lock {
         Self::take(LockData::Addressed(a)).await
     }
 
     async fn take(l: LockData) -> Lock {
+        let Some(sender) = SENDER.get() else {
+            return Lock(l);
+        };
         let (resume, wait) = oneshot::channel();
-        SENDER
-            .get()
-            .expect("Called `Lock::take` without `init_test` having run before.")
+        sender
             .send(Message::Stop(StopPoint {
                 resume,
                 lock_about_to_be_acquired: Some(l.clone()),
@@ -222,6 +226,8 @@ impl Lock {
 impl Drop for Lock {
     fn drop(&mut self) {
         // Avoid double-panic on lock failures.
-        let _ = SENDER.get().unwrap().send(Message::Unlock(self.0.clone()));
+        SENDER
+            .get()
+            .map(|s| s.send(Message::Unlock(self.0.clone())));
     }
 }

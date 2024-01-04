@@ -132,3 +132,28 @@ async fn check_passing_locks() {
 
     tokio::try_join!(a, b, h).unwrap();
 }
+
+#[tokio::test]
+async fn functions_without_init_dont_break() {
+    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let lock2 = lock.clone();
+    let a = tokio::task::spawn(reord::new_task(async move {
+        {
+            let _l = reord::Lock::take_named(String::from("foo")).await;
+            let _l = lock.lock().await;
+            reord::point().await;
+        }
+        reord::point().await;
+    }));
+
+    let b = tokio::task::spawn(reord::new_task(async move {
+        {
+            let _l = reord::Lock::take_named(String::from("foo")).await;
+            let _l = lock2.lock().await;
+            reord::point().await;
+        }
+        reord::point().await;
+    }));
+
+    tokio::try_join!(a, b).unwrap();
+}
