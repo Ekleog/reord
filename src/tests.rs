@@ -1,5 +1,11 @@
 use crate as reord;
-use std::time::Duration;
+use std::{
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 #[tokio::test]
 async fn basic_working_test() {
@@ -24,6 +30,30 @@ async fn basic_working_test() {
     println!("finished tests");
 
     tokio::try_join!(a, b, h).unwrap();
+}
+
+#[tokio::test]
+async fn basic_failing_test() {
+    reord::init_test(reord::Config::from_seed(Default::default())).await;
+
+    let data = Arc::new(AtomicUsize::new(0));
+    let data2 = data.clone();
+
+    let a = tokio::task::spawn(reord::new_task(async move {
+        data.fetch_add(1, Ordering::Relaxed);
+        reord::point().await;
+        assert!(data.load(Ordering::Relaxed) < 2);
+    }));
+
+    let b = tokio::task::spawn(reord::new_task(async move {
+        data2.fetch_add(1, Ordering::Relaxed);
+        reord::point().await;
+        assert!(data2.load(Ordering::Relaxed) < 2);
+    }));
+
+    let h = reord::start(2).await;
+
+    tokio::try_join!(a, b, h).unwrap_err();
 }
 
 #[tokio::test]
