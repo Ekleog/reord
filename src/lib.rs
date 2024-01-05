@@ -105,6 +105,19 @@ pub async fn point() {
     real::point().await
 }
 
+/// Lock information
+///
+/// This can be either a user-defined name, or an address. When using `Addressed`, you should usually take
+/// the address of the `Mutex`, `RwLock` or equivalent, and cast it to `usize`.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum LockInfo {
+    /// A user-defined name
+    Named(String),
+
+    /// An address, usually the address of a `Mutex` or similar cast to `usize`
+    Addressed(usize),
+}
+
 /// Lock handling
 ///
 /// This records, for `reord`, which locks are currently taken by the program. The lock should be acquired
@@ -146,6 +159,23 @@ impl Lock {
         #[cfg(any(test, feature = "test"))]
         let res = Lock {
             _data: real::Lock::take_addressed(address).await,
+        };
+        #[cfg(not(any(test, feature = "test")))]
+        let res = Lock { _unused: () };
+        res
+    }
+
+    /// Take multiple locks, atomically
+    ///
+    /// If you try to take multiple `reord::Lock`s one after the other before locking them atomically, then
+    /// `reord` will think that your first lock failed to actually lock. In order to avoid this, you should
+    /// use `reord::Lock::take_atomic` to take multiple locks.
+    #[inline]
+    #[allow(unused_variables)]
+    pub async fn take_atomic(l: Vec<LockInfo>) -> Lock {
+        #[cfg(any(test, feature = "test"))]
+        let res = Lock {
+            _data: real::Lock::take_atomic(l).await,
         };
         #[cfg(not(any(test, feature = "test")))]
         let res = Lock { _unused: () };

@@ -134,6 +134,91 @@ async fn check_passing_locks() {
 }
 
 #[tokio::test]
+async fn check_passing_two_locks() {
+    reord::init_test(reord::Config {
+        check_named_locks_work_for: Some(Duration::from_secs(1)),
+        ..reord::Config::from_seed(Default::default())
+    })
+    .await;
+
+    let lock1 = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let lock1_clone = lock1.clone();
+    let lock2 = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let lock2_clone = lock2.clone();
+    let a = tokio::task::spawn(reord::new_task(async move {
+        println!("before lock 1");
+        {
+            let _l = reord::Lock::take_atomic(vec![
+                reord::LockInfo::Named(String::from("lock1")),
+                reord::LockInfo::Named(String::from("lock2")),
+            ])
+            .await;
+            println!("taking lock 1");
+            let _l = lock1.lock().await;
+            let _l = lock2.lock().await;
+            println!("in lock 1");
+            reord::point().await;
+        }
+        reord::point().await;
+        println!("after lock 1");
+    }));
+
+    let b = tokio::task::spawn(reord::new_task(async move {
+        println!("before lock 2");
+        {
+            let _l = reord::Lock::take_atomic(vec![
+                reord::LockInfo::Named(String::from("lock1")),
+                reord::LockInfo::Named(String::from("lock2")),
+            ])
+            .await;
+            println!("taking lock 2");
+            let _l = lock1_clone.lock().await;
+            let _l = lock2_clone.lock().await;
+            println!("in lock 2");
+            reord::point().await;
+        }
+        reord::point().await;
+        println!("after lock 2");
+    }));
+
+    let h = reord::start(2).await;
+
+    tokio::try_join!(a, b, h).unwrap();
+}
+
+#[tokio::test]
+async fn waiting_on_two_locks_vs_one() {
+    reord::init_test(reord::Config {
+        check_addressed_locks_work_for: Some(std::time::Duration::from_millis(100)),
+        ..reord::Config::from_seed(Default::default())
+    })
+    .await;
+
+    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let lock_clone = lock.clone();
+
+    let a = tokio::task::spawn(reord::new_task(async move {
+        let _l = reord::Lock::take_addressed(0).await;
+        let _l = lock.lock().await;
+        reord::point().await;
+    }));
+
+    let b = tokio::task::spawn(reord::new_task(async move {
+        let _l = reord::Lock::take_atomic(vec![
+            reord::LockInfo::Addressed(0),
+            reord::LockInfo::Addressed(1),
+        ])
+        .await;
+        let _l = lock_clone.lock().await;
+        reord::point().await;
+    }));
+
+    let h = reord::start(2).await;
+
+    tokio::try_join!(a, b, h).unwrap();
+}
+
+#[tokio::test]
 async fn functions_without_init_dont_break() {
     let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let lock2 = lock.clone();

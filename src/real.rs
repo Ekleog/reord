@@ -1,4 +1,4 @@
-use crate::Config;
+use crate::{Config, LockInfo};
 use rand::{seq::SliceRandom, SeedableRng};
 use std::{
     collections::HashSet,
@@ -12,23 +12,39 @@ impl Config {
     fn can_resume(
         &self,
         s: &StopPoint,
-        locks: &HashSet<LockData>,
+        locks: &HashSet<LockInfo>,
         has_blocked_task_waiting: bool,
     ) -> bool {
-        match &s.lock_about_to_be_acquired {
-            None => true,
-            Some(l) if !locks.contains(l) => true,
-            Some(_) if has_blocked_task_waiting => false,
-            Some(LockData::Addressed(_)) => self.check_addressed_locks_work_for.is_some(),
-            Some(LockData::Named(_)) => self.check_named_locks_work_for.is_some(),
+        for l in s.locks_about_to_be_acquired.iter() {
+            match l {
+                l if !locks.contains(l) => (),
+                _ if has_blocked_task_waiting => return false,
+                LockInfo::Addressed(_) if self.check_addressed_locks_work_for.is_some() => (),
+                LockInfo::Named(_) if self.check_named_locks_work_for.is_some() => (),
+                _ => return false,
+            }
         }
+        true
     }
 
-    fn lock_check_time(&self, l: &LockData, locks: &HashSet<LockData>) -> Option<Duration> {
-        match l {
-            l if !locks.contains(l) => None,
-            LockData::Addressed(_) => Some(self.check_addressed_locks_work_for.unwrap()),
-            LockData::Named(_) => Some(self.check_named_locks_work_for.unwrap()),
+    fn lock_check_time(&self, l: &[LockInfo], locks: &HashSet<LockInfo>) -> Option<Duration> {
+        let mut locks_addressed = false;
+        let mut locks_named = false;
+        for l in l {
+            match l {
+                l if !locks.contains(l) => (),
+                LockInfo::Addressed(_) => locks_addressed = true,
+                LockInfo::Named(_) => locks_named = true,
+            }
+        }
+        match (locks_addressed, locks_named) {
+            (false, false) => None,
+            (true, false) => Some(self.check_addressed_locks_work_for.unwrap()),
+            (false, true) => Some(self.check_named_locks_work_for.unwrap()),
+            (true, true) => Some(std::cmp::max(
+                self.check_addressed_locks_work_for.unwrap(),
+                self.check_named_locks_work_for.unwrap(),
+            )),
         }
     }
 }
@@ -36,14 +52,14 @@ impl Config {
 #[derive(Debug)]
 struct StopPoint {
     resume: oneshot::Sender<()>,
-    lock_about_to_be_acquired: Option<LockData>,
+    locks_about_to_be_acquired: Vec<LockInfo>,
 }
 
 impl StopPoint {
     fn without_lock(resume: oneshot::Sender<()>) -> StopPoint {
         StopPoint {
             resume,
-            lock_about_to_be_acquired: None,
+            locks_about_to_be_acquired: Vec::new(),
         }
     }
 }
@@ -53,7 +69,7 @@ enum Message {
     NewTask(StopPoint),
     Start,
     Stop(StopPoint),
-    Unlock(LockData),
+    Unlock(LockInfo),
     TaskEnd,
 }
 
@@ -132,9 +148,9 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
 
     let mut rng = rand::rngs::StdRng::from_seed(cfg.seed);
     tokio::task::spawn(async move {
-        let mut locks = HashSet::<LockData>::new();
+        let mut locks = HashSet::<LockInfo>::new();
         let mut pending_stops = Vec::<StopPoint>::new();
-        let mut blocked_task_waiting_on = None;
+        let mut blocked_task_waiting_on: HashSet<LockInfo> = HashSet::new();
         let mut skip_next_resume = false;
         while let Some(m) = receiver.recv().await {
             let should_resume = matches!(m, Message::Stop(_) | Message::Start | Message::TaskEnd);
@@ -142,9 +158,10 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
                 Message::Start | Message::TaskEnd => (),
                 Message::Unlock(l) => {
                     locks.remove(&l);
-                    if blocked_task_waiting_on == Some(l) {
-                        blocked_task_waiting_on = None;
-                        skip_next_resume = true;
+                    if !blocked_task_waiting_on.is_empty() {
+                        blocked_task_waiting_on.remove(&l);
+                        // Skip the next resume if this unblocked the blocked task
+                        skip_next_resume = blocked_task_waiting_on.is_empty();
                     }
                 }
                 Message::NewTask(p) | Message::Stop(p) => {
@@ -166,7 +183,7 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
                     cfg.can_resume(
                         &pending_stops[*s],
                         &locks,
-                        blocked_task_waiting_on.is_some(),
+                        !blocked_task_waiting_on.is_empty(),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -175,17 +192,25 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
                 .expect("Deadlock detected!");
             let resume = pending_stops.swap_remove(*resume_idx);
             resume.resume.send(()).expect("Failed to resume a task");
-            if let Some(lock) = resume.lock_about_to_be_acquired {
-                let lock_check_time = cfg.lock_check_time(&lock, &locks);
-                locks.insert(lock.clone());
+            if !resume.locks_about_to_be_acquired.is_empty() {
+                let lock_check_time =
+                    cfg.lock_check_time(&resume.locks_about_to_be_acquired, &locks);
+                let conflicting_locks = resume
+                    .locks_about_to_be_acquired
+                    .iter()
+                    .filter(|l| locks.contains(&l))
+                    .cloned()
+                    .collect();
+                locks.extend(resume.locks_about_to_be_acquired.iter().cloned());
                 if let Some(lock_check_time) = lock_check_time {
                     match tokio::time::timeout(lock_check_time, receiver.recv()).await {
                         Ok(_) => panic!(
-                            "Lock {lock:?} did not actually prevent other task from executing"
+                            "Locks {:?} did not actually prevent the task from executing when it should have been blocked",
+                            resume.locks_about_to_be_acquired,
                         ),
                         Err(_) => (),
                     }
-                    blocked_task_waiting_on = Some(lock);
+                    blocked_task_waiting_on = conflicting_locks;
                     SENDER
                         .read()
                         .unwrap()
@@ -216,26 +241,20 @@ pub async fn point() {
 }
 
 #[derive(Debug)]
-pub struct Lock(LockData);
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum LockData {
-    Named(String),
-    Addressed(usize),
-}
+pub struct Lock(Vec<LockInfo>);
 
 impl Lock {
     #[inline]
     pub async fn take_named(s: String) -> Lock {
-        Self::take(LockData::Named(s)).await
+        Self::take_atomic(vec![LockInfo::Named(s)]).await
     }
 
     #[inline]
     pub async fn take_addressed(a: usize) -> Lock {
-        Self::take(LockData::Addressed(a)).await
+        Self::take_atomic(vec![LockInfo::Addressed(a)]).await
     }
 
-    async fn take(l: LockData) -> Lock {
+    pub async fn take_atomic(l: Vec<LockInfo>) -> Lock {
         if SENDER.read().unwrap().is_none() {
             return Lock(l);
         }
@@ -247,7 +266,7 @@ impl Lock {
             .unwrap()
             .send(Message::Stop(StopPoint {
                 resume,
-                lock_about_to_be_acquired: Some(l.clone()),
+                locks_about_to_be_acquired: l.clone(),
             }))
             .expect("sending stop point");
         wait.await
@@ -258,11 +277,13 @@ impl Lock {
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        // Avoid double-panic on lock failures.
-        SENDER
-            .read()
-            .unwrap()
-            .as_ref()
-            .map(|s| s.send(Message::Unlock(self.0.clone())));
+        for l in self.0.iter() {
+            // Avoid double-panic on lock failures.
+            SENDER
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|s| s.send(Message::Unlock(l.clone())));
+        }
     }
 }
