@@ -157,3 +157,42 @@ async fn functions_without_init_dont_break() {
 
     tokio::try_join!(a, b).unwrap();
 }
+
+#[tokio::test]
+async fn two_tests_same_thread() {
+    // First test
+    reord::init_test(reord::Config::with_random_seed()).await;
+
+    let a = tokio::task::spawn(reord::new_task(async move {
+        reord::point().await;
+    }));
+
+    let b = tokio::task::spawn(reord::new_task(async move {
+        reord::point().await;
+    }));
+
+    let h = reord::start(2).await;
+
+    let (a, b, h) = tokio::join!(a, b, h);
+    a.unwrap();
+    b.unwrap();
+    h.unwrap();
+
+    // Second test
+    reord::init_test(reord::Config::with_random_seed()).await;
+
+    let a = tokio::task::spawn(reord::new_task(async move {
+        reord::point().await;
+    }));
+
+    let b = tokio::task::spawn(reord::new_task(async move {
+        reord::point().await;
+    }));
+
+    let h = reord::start(2).await;
+
+    let (a, b, h) = tokio::join!(a, b, h);
+    a.unwrap();
+    b.unwrap();
+    h.unwrap();
+}
