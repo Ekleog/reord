@@ -3,7 +3,7 @@ use rand::{seq::SliceRandom, SeedableRng};
 use std::{
     collections::HashSet,
     future::Future,
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, RwLock},
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -57,32 +57,45 @@ enum Message {
     TaskEnd,
 }
 
-static SENDER: OnceLock<mpsc::UnboundedSender<Message>> = OnceLock::new();
+static SENDER: RwLock<Option<mpsc::UnboundedSender<Message>>> = RwLock::new(None);
 static OVERSEER: Mutex<Option<(Config, mpsc::UnboundedReceiver<Message>)>> = Mutex::new(None);
 
 pub async fn init_test(cfg: Config) {
     eprintln!("Running `reord` test with random seed {:?}", cfg.seed);
 
     let (s, r) = mpsc::unbounded_channel();
-    SENDER.set(s)
-        .expect("The test was already initialized! Note that `reord` is only designed to work with `cargo-nextest`.");
+    if let Some(s) = SENDER.write().unwrap().replace(s) {
+        if !s.send(Message::Start).is_err() {
+            panic!("Initializing a new test while the old test was still running! Note that `reord` is only designed to work with `cargo-nextest`.");
+        }
+    }
 
     assert!(OVERSEER.lock().unwrap().replace((cfg, r)).is_none());
 }
 
 pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
-    let Some(sender) = SENDER.get() else {
+    if SENDER.read().unwrap().is_none() {
         return f.await;
-    };
+    }
 
     let (s, r) = oneshot::channel();
-    sender
+    SENDER
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
         .send(Message::NewTask(StopPoint::without_lock(s)))
         .expect("submitting credentials to run");
     r.await
         .expect("Overseer died, please check other panic messages");
     let res = f.await;
-    sender.send(Message::TaskEnd).expect("submitting task end");
+    SENDER
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .send(Message::TaskEnd)
+        .expect("submitting task end");
     res
 }
 
@@ -103,8 +116,9 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
         }
     }
 
-    let sender = SENDER
-        .get()
+    let sender_lock = SENDER.read().unwrap();
+    let sender = sender_lock
+        .as_ref()
         .expect("Called `start` without `init_test` having run before.");
     for s in new_tasks {
         sender
@@ -114,6 +128,7 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
     sender
         .send(Message::Start)
         .expect("submitting start message");
+    std::mem::drop(sender_lock);
 
     let mut rng = rand::rngs::StdRng::from_seed(cfg.seed);
     tokio::task::spawn(async move {
@@ -171,7 +186,13 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
                         Err(_) => (),
                     }
                     blocked_task_waiting_on = Some(lock);
-                    SENDER.get().unwrap().send(Message::Start).unwrap();
+                    SENDER
+                        .read()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .send(Message::Start)
+                        .unwrap();
                 }
             }
         }
@@ -179,11 +200,15 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
 }
 
 pub async fn point() {
-    let Some(sender) = SENDER.get() else {
+    if SENDER.read().unwrap().is_none() {
         return;
-    };
+    }
     let (s, r) = oneshot::channel();
-    sender
+    SENDER
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
         .send(Message::Stop(StopPoint::without_lock(s)))
         .expect("submitting stop point");
     r.await
@@ -211,11 +236,15 @@ impl Lock {
     }
 
     async fn take(l: LockData) -> Lock {
-        let Some(sender) = SENDER.get() else {
+        if SENDER.read().unwrap().is_none() {
             return Lock(l);
-        };
+        }
         let (resume, wait) = oneshot::channel();
-        sender
+        SENDER
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
             .send(Message::Stop(StopPoint {
                 resume,
                 lock_about_to_be_acquired: Some(l.clone()),
@@ -231,7 +260,9 @@ impl Drop for Lock {
     fn drop(&mut self) {
         // Avoid double-panic on lock failures.
         SENDER
-            .get()
+            .read()
+            .unwrap()
+            .as_ref()
             .map(|s| s.send(Message::Unlock(self.0.clone())));
     }
 }
