@@ -87,7 +87,11 @@ pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
 }
 
 pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
-    let (cfg, mut receiver) = OVERSEER.lock().unwrap().take().unwrap();
+    let (cfg, mut receiver) = OVERSEER
+        .lock()
+        .unwrap()
+        .take()
+        .expect("Called `reord::start` without a `reord::init_test` call before");
 
     let mut new_tasks = Vec::with_capacity(tasks);
     for _ in 0..tasks {
