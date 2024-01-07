@@ -258,10 +258,7 @@ async fn two_tests_same_thread() {
 
     let h = reord::start(2).await;
 
-    let (a, b, h) = tokio::join!(a, b, h);
-    a.unwrap();
-    b.unwrap();
-    h.unwrap();
+    tokio::try_join!(a, b, h).unwrap();
 
     // Second test
     reord::init_test(reord::Config::with_random_seed()).await;
@@ -276,8 +273,5 @@ async fn two_tests_same_thread() {
 
     let h = reord::start(2).await;
 
-    let (a, b, h) = tokio::join!(a, b, h);
-    a.unwrap();
-    b.unwrap();
-    h.unwrap();
+    tokio::try_join!(a, b, h).unwrap();
 }
