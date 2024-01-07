@@ -1,4 +1,5 @@
 use crate::{Config, LockInfo};
+use futures::FutureExt;
 use rand::{seq::SliceRandom, SeedableRng};
 use std::{
     collections::HashSet,
@@ -104,7 +105,8 @@ pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
         .expect("submitting credentials to run");
     r.await
         .expect("Overseer died, please check other panic messages");
-    let res = f.await;
+    // We just pause the panic long enough to send TaskEnd, so this should be OK.
+    let res = std::panic::AssertUnwindSafe(f).catch_unwind().await;
     SENDER
         .read()
         .unwrap()
@@ -112,7 +114,10 @@ pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
         .unwrap()
         .send(Message::TaskEnd)
         .expect("submitting task end");
-    res
+    match res {
+        Ok(r) => r,
+        Err(e) => std::panic::resume_unwind(e),
+    }
 }
 
 pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {

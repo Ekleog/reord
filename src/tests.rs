@@ -275,3 +275,24 @@ async fn two_tests_same_thread() {
 
     tokio::try_join!(a, b, h).unwrap();
 }
+
+#[tokio::test]
+#[should_panic]
+async fn join_does_not_deadlock() {
+    reord::init_test(reord::Config::with_random_seed()).await;
+
+    let a = tokio::task::spawn(reord::new_task(async move {
+        reord::point().await;
+    }));
+
+    let b = tokio::task::spawn(reord::new_task(async move {
+        panic!("willing fail");
+    }));
+
+    let h = reord::start(2).await;
+
+    let (a, b, h) = tokio::join!(a, b, h);
+    a.unwrap();
+    b.unwrap();
+    h.unwrap();
+}
