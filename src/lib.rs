@@ -6,6 +6,9 @@ use std::{future::Future, time::Duration};
 #[cfg(any(test, feature = "test"))]
 mod real;
 
+#[cfg(all(test, not(feature = "test")))]
+const _: () = panic!("Trying to test `reord` without its `test` feature");
+
 /// Configuration for a `reord`-based test
 #[derive(Debug)]
 #[non_exhaustive]
@@ -51,9 +54,6 @@ impl Config {
     }
 }
 
-#[cfg(all(test, not(feature = "test")))]
-const _: () = panic!("Trying to test `reord` without its `test` feature");
-
 /// Start a test
 ///
 /// Note that this relies on global variables for convenience, and thus should only ever be used with
@@ -61,7 +61,7 @@ const _: () = panic!("Trying to test `reord` without its `test` feature");
 #[inline]
 #[allow(unused_variables)]
 pub async fn init_test(config: Config) {
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(feature = "test")]
     real::init_test(config).await
 }
 
@@ -70,9 +70,9 @@ pub async fn init_test(config: Config) {
 /// This should be used around all the futures spawned by the test
 #[inline]
 pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(feature = "test")]
     let res = real::new_task(f).await;
-    #[cfg(not(any(test, feature = "test")))]
+    #[cfg(not(feature = "test"))]
     let res = f.await;
     res
 }
@@ -90,9 +90,9 @@ pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
 #[inline]
 #[allow(unused_variables)]
 pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
-    #[cfg(not(any(test, feature = "test")))]
+    #[cfg(not(feature = "test"))]
     panic!("Trying to start a `reord` test, but the `test` feature is not set");
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(feature = "test")]
     real::start(tasks).await
 }
 
@@ -101,7 +101,7 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
 /// Reaching this point makes `reord` able to switch the execution to another thread.
 #[inline]
 pub async fn point() {
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(feature = "test")]
     real::point().await
 }
 
@@ -132,9 +132,9 @@ pub enum LockInfo {
 /// non-reproducible behavior, due to two execution threads actually running in parallel on your executor.
 #[derive(Debug)]
 pub struct Lock {
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(feature = "test")]
     _data: real::Lock,
-    #[cfg(not(any(test, feature = "test")))]
+    #[cfg(not(feature = "test"))]
     _unused: (),
 }
 
@@ -143,11 +143,11 @@ impl Lock {
     #[inline]
     #[allow(unused_variables)]
     pub async fn take_named(name: String) -> Lock {
-        #[cfg(any(test, feature = "test"))]
+        #[cfg(feature = "test")]
         let res = Lock {
             _data: real::Lock::take_named(name).await,
         };
-        #[cfg(not(any(test, feature = "test")))]
+        #[cfg(not(feature = "test"))]
         let res = Lock { _unused: () };
         res
     }
@@ -156,11 +156,11 @@ impl Lock {
     #[inline]
     #[allow(unused_variables)]
     pub async fn take_addressed(address: usize) -> Lock {
-        #[cfg(any(test, feature = "test"))]
+        #[cfg(feature = "test")]
         let res = Lock {
             _data: real::Lock::take_addressed(address).await,
         };
-        #[cfg(not(any(test, feature = "test")))]
+        #[cfg(not(feature = "test"))]
         let res = Lock { _unused: () };
         res
     }
@@ -173,11 +173,11 @@ impl Lock {
     #[inline]
     #[allow(unused_variables)]
     pub async fn take_atomic(l: Vec<LockInfo>) -> Lock {
-        #[cfg(any(test, feature = "test"))]
+        #[cfg(feature = "test")]
         let res = Lock {
             _data: real::Lock::take_atomic(l).await,
         };
-        #[cfg(not(any(test, feature = "test")))]
+        #[cfg(not(feature = "test"))]
         let res = Lock { _unused: () };
         res
     }
