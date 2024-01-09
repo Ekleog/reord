@@ -9,6 +9,9 @@ mod real;
 #[cfg(all(test, not(feature = "test")))]
 const _: () = panic!("Trying to test `reord` without its `test` feature");
 
+// TODO: implement RwLocks
+// TODO: make the seed just be a u128
+
 /// Configuration for a `reord`-based test
 #[derive(Debug)]
 #[non_exhaustive]
