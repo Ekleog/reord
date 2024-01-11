@@ -134,6 +134,53 @@ async fn check_passing_locks() {
 }
 
 #[tokio::test]
+async fn detect_deadlock() {
+    reord::init_test(reord::Config {
+        check_addressed_locks_work_for: Some(Duration::from_secs(1)),
+        ..reord::Config::from_seed(Default::default())
+    })
+    .await;
+
+    let lock1 = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let lock1_clone = lock1.clone();
+    let lock2 = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let lock2_clone = lock2.clone();
+    let a = tokio::task::spawn(reord::new_task(async move {
+        {
+            println!("A taking lock 1");
+            let _l = reord::Lock::take_addressed(1).await;
+            let _l = lock1.lock().await;
+            reord::point().await;
+            eprintln!("A taking lock 2");
+            let _l = reord::Lock::take_addressed(2).await;
+            let _l = lock2.lock().await;
+            println!("A successfully taken both locks");
+            reord::point().await;
+        }
+        println!("A after unlock");
+    }));
+
+    let b = tokio::task::spawn(reord::new_task(async move {
+        {
+            println!("B taking lock 2");
+            let _l = reord::Lock::take_addressed(2).await;
+            let _l = lock2_clone.lock().await;
+            reord::point().await;
+            eprintln!("B taking lock 1");
+            let _l = reord::Lock::take_addressed(1).await;
+            let _l = lock1_clone.lock().await;
+            println!("B successfully taken both locks");
+            reord::point().await;
+        }
+        println!("B after unlock");
+    }));
+
+    let h = reord::start(2).await;
+
+    tokio::try_join!(a, b, h).unwrap_err();
+}
+
+#[tokio::test]
 async fn check_passing_two_locks() {
     reord::init_test(reord::Config {
         check_named_locks_work_for: Some(Duration::from_secs(1)),
