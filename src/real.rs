@@ -170,9 +170,16 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
             match m {
                 Message::Start | Message::TaskEnd => (),
                 Message::Unlock(l) => {
-                    locks.remove(&l);
-                    if !blocked_task_waiting_on.is_empty() {
-                        blocked_task_waiting_on.remove(&l);
+                    if blocked_task_waiting_on.is_empty() {
+                        // There's no blocked task. Simple path.
+                        locks.remove(&l);
+                    } else {
+                        // There's a blocked task. Hard path.
+                        // If there's already a task blocked on this lock, give the lock to the task
+                        // If not, release the lock normally
+                        if !blocked_task_waiting_on.remove(&l) {
+                            locks.remove(&l);
+                        }
                         // Skip the next resume if this unblocked the blocked task
                         skip_next_resume = blocked_task_waiting_on.is_empty();
                     }

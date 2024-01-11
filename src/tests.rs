@@ -188,6 +188,66 @@ async fn detect_deadlock() {
 }
 
 #[tokio::test]
+#[allow(non_snake_case)]
+async fn lock_LUL_vs_L_deadlocked() {
+    // This bug was with the following interleaving:
+    // - A takes lock 1
+    // - B takes lock 1. Reord lets B go for it in order to check that B doesn't progress. It works fine, reord continues.
+    // - A releases lock 1. This should give the lock to B, but here reord was then counting the lock as being entirely free.
+    // - A takes lock 1. This should be prevented by reord, but reord mistakenly thought that lock 1 was free. Ergo, deadlock.
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::FmtSubscriber::builder()
+            .with_max_level(tracing::Level::TRACE)
+            .finish(),
+    )
+    .unwrap();
+
+    reord::init_test(reord::Config {
+        check_addressed_locks_work_for: Some(Duration::from_secs(1)),
+        ..reord::Config::from_seed(Default::default())
+    })
+    .await;
+
+    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let lock_clone = lock.clone();
+    let a = tokio::task::spawn(reord::new_task(async move {
+        {
+            {
+                println!("A taking lock 1");
+                let _l = reord::Lock::take_addressed(1).await;
+                let _l = lock.lock().await;
+                reord::point().await;
+                eprintln!("A releasing lock 1");
+            }
+            reord::point().await;
+            eprintln!("A taking lock 1");
+            let _l = reord::Lock::take_addressed(1).await;
+            let _l = lock.lock().await;
+        }
+        println!("A after unlock");
+    }));
+
+    let b = tokio::task::spawn(reord::new_task(async move {
+        {
+            eprintln!("B taking lock 1");
+            let _l = reord::Lock::take_addressed(1).await;
+            let _l = lock_clone.lock().await;
+            // A few awaits to make sure the RNG makes B keep the lock for long enough to get back to A
+            reord::point().await;
+            reord::point().await;
+            reord::point().await;
+            reord::point().await;
+            reord::point().await;
+        }
+        println!("B after unlock");
+    }));
+
+    let h = reord::start(2).await;
+
+    tokio::try_join!(a, b, h).unwrap();
+}
+
+#[tokio::test]
 async fn check_passing_two_locks() {
     reord::init_test(reord::Config {
         check_named_locks_work_for: Some(Duration::from_secs(1)),
