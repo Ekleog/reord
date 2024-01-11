@@ -9,3 +9,5 @@ In addition, if configured to, it can check that your locks work properly, by wa
 You can (and should) sprinkle `reord` function calls throughout your production code, as it will compile to noops when the `test` feature is not set.
 
 On the other hand, given this convenience was a goal, `reord` uses global variables to proxy information on the running test. This means that a threaded test framework like `cargo test` will not work with multiple `reord` tests. You should use `cargo nextest` when having tests that use `reord`.
+
+If `reord` actually finds a bug in your code, you can get detailed logging of the thread interleaving pattern by turning on the `tracing` feature. `reord` outputs logs at the `TRACE` level. Note that the `tracing` feature currently requires `tokio_unstable`, so `RUSTFLAGS="--cfg tokio_unstable"`. When `tokio::task::id` gets stabilized, this will no longer be necessary. Meanwhile, please do not depend on the `tracing` feature without careful consideration!

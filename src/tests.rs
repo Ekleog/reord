@@ -135,6 +135,13 @@ async fn check_passing_locks() {
 
 #[tokio::test]
 async fn detect_deadlock() {
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::FmtSubscriber::builder()
+            .with_max_level(tracing::Level::TRACE)
+            .finish(),
+    )
+    .unwrap();
+
     reord::init_test(reord::Config {
         check_addressed_locks_work_for: Some(Duration::from_secs(1)),
         ..reord::Config::from_seed(Default::default())

@@ -92,6 +92,8 @@ pub async fn init_test(cfg: Config) {
 
 pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
     if SENDER.read().unwrap().is_none() {
+        #[cfg(feature = "tracing")]
+        tracing::trace!(tid=?tokio::task::id(), "running with reord disabled");
         return f.await;
     }
 
@@ -103,10 +105,16 @@ pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
         .unwrap()
         .send(Message::NewTask(StopPoint::without_lock(s)))
         .expect("submitting credentials to run");
+    #[cfg(feature = "tracing")]
+    tracing::trace!(tid=?tokio::task::id(), "prepared for running");
     r.await
         .expect("Overseer died, please check other panic messages");
+    #[cfg(feature = "tracing")]
+    tracing::trace!(tid=?tokio::task::id(), "running");
     // We just pause the panic long enough to send TaskEnd, so this should be OK.
     let res = std::panic::AssertUnwindSafe(f).catch_unwind().await;
+    #[cfg(feature = "tracing")]
+    tracing::trace!(tid=?tokio::task::id(), "finished running");
     SENDER
         .read()
         .unwrap()
@@ -241,8 +249,12 @@ pub async fn point() {
         .unwrap()
         .send(Message::Stop(StopPoint::without_lock(s)))
         .expect("submitting stop point");
+    #[cfg(feature = "tracing")]
+    tracing::trace!(tid=?tokio::task::id(), "pausing");
     r.await
         .expect("Overseer died, please check other panic messages");
+    #[cfg(feature = "tracing")]
+    tracing::trace!(tid=?tokio::task::id(), "resuming");
 }
 
 #[derive(Debug)]
@@ -274,14 +286,20 @@ impl Lock {
                 locks_about_to_be_acquired: l.clone(),
             }))
             .expect("sending stop point");
+        #[cfg(feature = "tracing")]
+        tracing::trace!(tid=?tokio::task::id(), locks=?l, "pausing waiting for locks");
         wait.await
             .expect("Overseer died, please check other panic messages");
+        #[cfg(feature = "tracing")]
+        tracing::trace!(tid=?tokio::task::id(), locks=?l, "resuming and acquiring locks");
         Lock(l)
     }
 }
 
 impl Drop for Lock {
     fn drop(&mut self) {
+        #[cfg(feature = "tracing")]
+        tracing::trace!(tid=?tokio::task::id(), locks=?self.0, "releasing locks");
         for l in self.0.iter() {
             // Avoid double-panic on lock failures.
             SENDER

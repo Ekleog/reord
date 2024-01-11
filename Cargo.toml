@@ -17,6 +17,9 @@ test = []
 futures = "0.3.29"
 rand = "0.8.5"
 tokio = { version = "1.35", features = ["rt", "sync", "time"] }
+tracing = { version = "0.1.40", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.35", features = ["macros"] }
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
