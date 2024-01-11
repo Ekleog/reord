@@ -204,6 +204,17 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
                 .choose(&mut rng)
                 .expect("Deadlock detected!");
             let resume = pending_stops.swap_remove(*resume_idx);
+            #[cfg(feature = "tracing")]
+            if cfg
+                .lock_check_time(&resume.locks_about_to_be_acquired, &locks)
+                .is_some()
+            {
+                tracing::debug!(
+                    new_locks=?resume.locks_about_to_be_acquired,
+                    already_locked=?locks,
+                    "tentatively resuming a task to validate it does not make progress"
+                )
+            }
             resume.resume.send(()).expect("Failed to resume a task");
             if !resume.locks_about_to_be_acquired.is_empty() {
                 let lock_check_time =
