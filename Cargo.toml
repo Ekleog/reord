@@ -1,6 +1,6 @@
 [package]
 name = "reord"
-version = "0.1.5" # NOTE: Incompatible change [u8; 32] -> u128 in seed
+version = "0.2.0"
 edition = "2021"
 readme = "README.md"
 documentation = "https://docs.rs/reord"
