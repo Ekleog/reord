@@ -159,7 +159,7 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
         .expect("submitting start message");
     std::mem::drop(sender_lock);
 
-    let mut rng = rand::rngs::StdRng::from_seed(cfg.seed);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(cfg.seed);
     tokio::task::spawn(async move {
         let mut locks = HashSet::<LockInfo>::new();
         let mut pending_stops = Vec::<StopPoint>::new();

@@ -10,7 +10,6 @@ mod real;
 const _: () = panic!("Trying to test `reord` without its `test` feature");
 
 // TODO: implement RwLocks
-// TODO: make the seed just be a u128
 
 /// Configuration for a `reord`-based test
 #[derive(Debug)]
@@ -21,7 +20,7 @@ pub struct Config {
     /// Changing this seed will give other task orderings, but leaving it the same should (if
     /// lock tracking is correctly implemented by the application using `Lock`) keep execution
     /// reproducible.
-    pub seed: [u8; 32],
+    pub seed: u64,
 
     /// If set to `Some`, will allow two tasks to voluntarily collide on a named lock to validate
     /// that locking is implemented correctly. It will then wait for the time indicated by this
@@ -48,7 +47,7 @@ impl Config {
     }
 
     /// Generate a configuration with the default parameters from a given seed
-    pub fn from_seed(seed: [u8; 32]) -> Config {
+    pub fn from_seed(seed: u64) -> Config {
         Config {
             seed,
             check_addressed_locks_work_for: None,
