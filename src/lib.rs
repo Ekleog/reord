@@ -42,8 +42,10 @@ impl Config {
     /// Generate a configuration with the default parameters and a random seed
     pub fn with_random_seed() -> Config {
         use rand::Rng;
+        let seed = rand::thread_rng().gen();
+        eprintln!("Running `reord` test with random seed {:?}", seed);
         Config {
-            seed: rand::thread_rng().gen(),
+            seed,
             maybe_lock_timeout: Duration::from_millis(200),
             check_addressed_locks_work_for: None,
             check_named_locks_work_for: None,

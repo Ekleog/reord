@@ -322,8 +322,6 @@ impl Overseer {
 }
 
 pub async fn init_test(cfg: Config) {
-    eprintln!("Running `reord` test with random seed {:?}", cfg.seed);
-
     let (s, r) = mpsc::unbounded_channel();
     if let Some(s) = SENDER.write().unwrap().replace(s) {
         if !s.send(Message::Start).is_err() {
