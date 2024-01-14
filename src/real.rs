@@ -101,15 +101,17 @@ enum Message {
     NewTask(StopPoint),
     Start,
     Stop(StopPoint),
-    Unlock(LockInfo),
-    TaskEnd,
+    Unlock(usize, LockInfo),
+    TaskEnd(usize),
 }
 
 impl Message {
-    fn task_id(&self) -> Option<usize> {
+    fn task_id(&self) -> usize {
         match self {
-            Message::NewTask(p) | Message::Stop(p) => Some(p.task_id),
-            _ => None,
+            Message::NewTask(p) | Message::Stop(p) => p.task_id,
+            Message::TaskEnd(t) => *t,
+            Message::Unlock(t, _) => *t,
+            Message::Start => panic!("Called task_id on Message::Start"),
         }
     }
 }
@@ -154,10 +156,11 @@ impl Overseer {
 
     // Returns true iff we should resume a task after this message
     fn handle_message(&mut self, m: Message) -> bool {
-        let mut should_resume = matches!(m, Message::Stop(_) | Message::Start | Message::TaskEnd);
+        let mut should_resume =
+            matches!(m, Message::Stop(_) | Message::Start | Message::TaskEnd(_));
         match m {
-            Message::Start | Message::TaskEnd => (),
-            Message::Unlock(l) => {
+            Message::Start | Message::TaskEnd(_) => (),
+            Message::Unlock(_, l) => {
                 if self.blocked_task_waiting_on.is_empty() {
                     // There's no blocked task. Simple path.
                     self.locks.remove(&l);
@@ -219,17 +222,16 @@ impl Overseer {
         loop {
             match tokio::time::timeout_at(deadline, self.receiver.recv()).await {
                 Err(_) => return true, // reached timeout
-                Ok(Some(m)) => match m.task_id() {
-                    Some(t) if t == task_id => {
+                Ok(Some(m)) => {
+                    if m.task_id() == task_id {
                         // continued and reached stop point
                         self.sender.send(m).unwrap();
                         return should_resume_after; // will resume when handling `m`
-                    }
-                    _ => {
+                    } else {
                         // Never resume a task here
                         should_resume_after |= self.handle_message(m);
                     }
-                },
+                }
                 Ok(None) => unreachable!(),
             }
         }
@@ -251,9 +253,10 @@ impl Overseer {
                     self.blocked_task_waiting_on = conflicting_locks;
                     return;
                 }
-                Ok(Some(m)) => match m.task_id() {
-                    Some(t) if t == task_id => panic!("Locks {locks:?} did not actually prevent the task from executing when it should have been blocked"),
-                    _ => {
+                Ok(Some(m)) => {
+                    if m.task_id() == task_id {
+                        panic!("Locks {locks:?} did not actually prevent the task from executing when it should have been blocked")
+                    } else {
                         // Never resume a task here
                         self.handle_message(m);
                     }
@@ -375,7 +378,7 @@ pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
             .unwrap()
             .as_ref()
             .unwrap()
-            .send(Message::TaskEnd)
+            .send(Message::TaskEnd(TASK_ID.get()))
             .expect("submitting task end");
         match res {
             Ok(r) => r,
@@ -508,7 +511,7 @@ impl Drop for Lock {
                 .read()
                 .unwrap()
                 .as_ref()
-                .map(|s| s.send(Message::Unlock(l.clone())));
+                .map(|s| s.send(Message::Unlock(TASK_ID.get(), l.clone())));
         }
     }
 }
