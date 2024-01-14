@@ -270,7 +270,17 @@ impl Overseer {
             return false;
         }
         if self.pending_stops.is_empty() {
-            return true;
+            if self.blocked_task_waiting_on.is_empty() && self.tasks_locked_in_maybe.is_empty() {
+                return true;
+            }
+            // Some tasks are currently blocked, wait for them
+            match tokio::time::timeout(Duration::from_secs(10), self.receiver.recv()).await {
+                Err(_) => panic!("10 seconds elapsed without blocked tasks making progress"),
+                Ok(m) => {
+                    self.sender.send(m.unwrap()).unwrap();
+                    return false;
+                }
+            }
         }
         loop {
             let resume = self.get_resumable_task();
