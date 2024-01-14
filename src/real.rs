@@ -2,7 +2,7 @@ use crate::{Config, LockInfo};
 use futures::FutureExt;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -124,12 +124,16 @@ tokio::task_local! {
     static TASK_ID: usize;
 }
 
+struct Task {
+    // TODO: Should this replace all the various hashsets from Overseer?
+}
+
 struct Overseer {
     receiver: mpsc::UnboundedReceiver<Message>,
     sender: mpsc::UnboundedSender<Message>,
     cfg: Config,
-
     rng: StdRng,
+    tasks: HashMap<usize, Task>,
     locks: HashSet<LockInfo>,
     pending_stops: Vec<StopPoint>,
     blocked_task_waiting_on: HashSet<LockInfo>,
@@ -146,6 +150,7 @@ impl Overseer {
             rng: StdRng::seed_from_u64(cfg.seed),
             cfg,
 
+            tasks: HashMap::new(),
             locks: HashSet::new(),
             pending_stops: Vec::new(),
             blocked_task_waiting_on: HashSet::new(),
@@ -156,10 +161,12 @@ impl Overseer {
 
     // Returns true iff we should resume a task after this message
     fn handle_message(&mut self, m: Message) -> bool {
-        let mut should_resume =
-            matches!(m, Message::Stop(_) | Message::Start | Message::TaskEnd(_));
         match m {
-            Message::Start | Message::TaskEnd(_) => (),
+            Message::Start => true,
+            Message::TaskEnd(t) => {
+                self.tasks.remove(&t);
+                true
+            }
             Message::Unlock(_, l) => {
                 if self.blocked_task_waiting_on.is_empty() {
                     // There's no blocked task. Simple path.
@@ -174,16 +181,23 @@ impl Overseer {
                     // Skip the next resume if this unblocked the blocked task
                     self.skip_next_resume = self.blocked_task_waiting_on.is_empty();
                 }
+                false
             }
-            Message::NewTask(p) | Message::Stop(p) => {
-                if self.tasks_locked_in_maybe.remove(&p.task_id) {
-                    // The task was blocked in a "maybe_lock". Do not resume anything.
-                    should_resume = false;
-                }
+            Message::NewTask(p) => {
+                self.tasks.insert(p.task_id, Task {});
                 self.pending_stops.push(p);
+                false
+            }
+            Message::Stop(p) => {
+                let task_id = p.task_id;
+                self.pending_stops.push(p);
+                if self.tasks_locked_in_maybe.remove(&task_id) {
+                    // The task was blocked in a "maybe_lock". Do not resume anything.
+                    return false;
+                }
+                true
             }
         }
-        should_resume
     }
 
     fn get_resumable_task(&mut self) -> StopPoint {
@@ -327,6 +341,7 @@ impl Overseer {
             if should_resume {
                 let test_over = self.do_resume().await;
                 if test_over {
+                    assert!(self.tasks.is_empty());
                     return;
                 }
             }
