@@ -4,7 +4,10 @@ use rand::{seq::SliceRandom, SeedableRng};
 use std::{
     collections::HashSet,
     future::Future,
-    sync::{Mutex, RwLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex, RwLock,
+    },
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -76,6 +79,11 @@ enum Message {
 
 static SENDER: RwLock<Option<mpsc::UnboundedSender<Message>>> = RwLock::new(None);
 static OVERSEER: Mutex<Option<(Config, mpsc::UnboundedReceiver<Message>)>> = Mutex::new(None);
+static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
+
+tokio::task_local! {
+    static TASK_ID: usize;
+}
 
 pub async fn init_test(cfg: Config) {
     eprintln!("Running `reord` test with random seed {:?}", cfg.seed);
@@ -88,44 +96,52 @@ pub async fn init_test(cfg: Config) {
     }
 
     assert!(OVERSEER.lock().unwrap().replace((cfg, r)).is_none());
+    NEXT_TASK_ID.store(1, Ordering::Relaxed);
 }
 
 pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
-    if SENDER.read().unwrap().is_none() {
-        #[cfg(feature = "tracing")]
-        tracing::trace!(tid=?tokio::task::id(), "running with reord disabled");
-        return f.await;
-    }
+    let task_id = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
+    let task_fut = TASK_ID.scope(task_id, async move {
+        if SENDER.read().unwrap().is_none() {
+            #[cfg(feature = "tracing")]
+            tracing::trace!(tid = TASK_ID.get(), "running with reord disabled");
+            return f.await;
+        }
 
-    let (s, r) = oneshot::channel();
-    SENDER
-        .read()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .send(Message::NewTask(StopPoint::without_lock(s)))
-        .expect("submitting credentials to run");
+        let (s, r) = oneshot::channel();
+        SENDER
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .send(Message::NewTask(StopPoint::without_lock(s)))
+            .expect("submitting credentials to run");
+        #[cfg(feature = "tracing")]
+        tracing::trace!("prepared for running");
+        r.await
+            .expect("Overseer died, please check other panic messages");
+        #[cfg(feature = "tracing")]
+        tracing::trace!("running");
+        // We just pause the panic long enough to send TaskEnd, so this should be OK.
+        let res = std::panic::AssertUnwindSafe(f).catch_unwind().await;
+        #[cfg(feature = "tracing")]
+        tracing::trace!("finished running");
+        SENDER
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .send(Message::TaskEnd)
+            .expect("submitting task end");
+        match res {
+            Ok(r) => r,
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    });
     #[cfg(feature = "tracing")]
-    tracing::trace!(tid=?tokio::task::id(), "prepared for running");
-    r.await
-        .expect("Overseer died, please check other panic messages");
-    #[cfg(feature = "tracing")]
-    tracing::trace!(tid=?tokio::task::id(), "running");
-    // We just pause the panic long enough to send TaskEnd, so this should be OK.
-    let res = std::panic::AssertUnwindSafe(f).catch_unwind().await;
-    #[cfg(feature = "tracing")]
-    tracing::trace!(tid=?tokio::task::id(), "finished running");
-    SENDER
-        .read()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .send(Message::TaskEnd)
-        .expect("submitting task end");
-    match res {
-        Ok(r) => r,
-        Err(e) => std::panic::resume_unwind(e),
-    }
+    let task_fut =
+        tracing::Instrument::instrument(task_fut, tracing::info_span!("task", tid = task_id));
+    task_fut.await
 }
 
 pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
@@ -268,11 +284,11 @@ pub async fn point() {
         .send(Message::Stop(StopPoint::without_lock(s)))
         .expect("submitting stop point");
     #[cfg(feature = "tracing")]
-    tracing::trace!(tid=?tokio::task::id(), "pausing");
+    tracing::trace!("pausing");
     r.await
         .expect("Overseer died, please check other panic messages");
     #[cfg(feature = "tracing")]
-    tracing::trace!(tid=?tokio::task::id(), "resuming");
+    tracing::trace!("resuming");
 }
 
 #[derive(Debug)]
@@ -305,11 +321,11 @@ impl Lock {
             }))
             .expect("sending stop point");
         #[cfg(feature = "tracing")]
-        tracing::trace!(tid=?tokio::task::id(), locks=?l, "pausing waiting for locks");
+        tracing::trace!(locks=?l, "pausing waiting for locks");
         wait.await
             .expect("Overseer died, please check other panic messages");
         #[cfg(feature = "tracing")]
-        tracing::trace!(tid=?tokio::task::id(), locks=?l, "resuming and acquiring locks");
+        tracing::trace!(locks=?l, "resuming and acquiring locks");
         Lock(l)
     }
 }
@@ -317,7 +333,7 @@ impl Lock {
 impl Drop for Lock {
     fn drop(&mut self) {
         #[cfg(feature = "tracing")]
-        tracing::trace!(tid=?tokio::task::id(), locks=?self.0, "releasing locks");
+        tracing::trace!(locks=?self.0, "releasing locks");
         for l in self.0.iter() {
             // Avoid double-panic on lock failures.
             SENDER
