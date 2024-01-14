@@ -124,10 +124,27 @@ tokio::task_local! {
     static TASK_ID: usize;
 }
 
-struct Task {
-    // TODO: Should this replace all the various hashsets from Overseer?
+#[derive(Debug, Eq, PartialEq)]
+enum TaskState {
+    Running,
+    Blocked,
+    Waiting,
 }
 
+#[derive(Debug)]
+struct Task {
+    state: TaskState,
+}
+
+impl Task {
+    fn new() -> Task {
+        Task {
+            state: TaskState::Waiting,
+        }
+    }
+}
+
+#[derive(Debug)]
 struct Overseer {
     receiver: mpsc::UnboundedReceiver<Message>,
     sender: mpsc::UnboundedSender<Message>,
@@ -136,6 +153,7 @@ struct Overseer {
     tasks: HashMap<usize, Task>,
     locks: HashSet<LockInfo>,
     pending_stops: Vec<StopPoint>,
+    blocked_task: Option<usize>,
     blocked_task_waiting_on: HashSet<LockInfo>,
     tasks_locked_in_maybe: HashSet<usize>,
     skip_next_resume: bool,
@@ -153,6 +171,7 @@ impl Overseer {
             tasks: HashMap::new(),
             locks: HashSet::new(),
             pending_stops: Vec::new(),
+            blocked_task: None,
             blocked_task_waiting_on: HashSet::new(),
             tasks_locked_in_maybe: HashSet::new(),
             skip_next_resume: false,
@@ -180,19 +199,25 @@ impl Overseer {
                     }
                     // Skip the next resume if this unblocked the blocked task
                     self.skip_next_resume = self.blocked_task_waiting_on.is_empty();
+                    self.tasks
+                        .get_mut(&self.blocked_task.take().unwrap())
+                        .unwrap()
+                        .state = TaskState::Running;
                 }
                 false
             }
             Message::NewTask(p) => {
-                self.tasks.insert(p.task_id, Task {});
+                self.tasks.insert(p.task_id, Task::new());
                 self.pending_stops.push(p);
                 false
             }
             Message::Stop(p) => {
                 let task_id = p.task_id;
+                self.tasks.get_mut(&task_id).unwrap().state = TaskState::Blocked;
                 self.pending_stops.push(p);
                 if self.tasks_locked_in_maybe.remove(&task_id) {
                     // The task was blocked in a "maybe_lock". Do not resume anything.
+                    self.tasks.get_mut(&task_id).unwrap().state = TaskState::Waiting;
                     return false;
                 }
                 true
@@ -233,9 +258,15 @@ impl Overseer {
     async fn just_resumed_maybe_lock(&mut self, task_id: usize) -> bool {
         let deadline = Instant::now() + self.cfg.maybe_lock_timeout;
         let mut should_resume_after = false;
+        tracing::warn!("   (just resumed maybe_lock)");
         loop {
             match tokio::time::timeout_at(deadline, self.receiver.recv()).await {
-                Err(_) => return true, // reached timeout
+                Err(_) => {
+                    // reached timeout
+                    self.tasks_locked_in_maybe.insert(task_id);
+                    self.tasks.get_mut(&task_id).unwrap().state = TaskState::Blocked;
+                    return true;
+                }
                 Ok(Some(m)) => {
                     if m.task_id() == task_id {
                         // continued and reached stop point
@@ -265,6 +296,7 @@ impl Overseer {
                 Err(_) => {
                     // reached timeout
                     self.blocked_task_waiting_on = conflicting_locks;
+                    self.blocked_task = Some(task_id);
                     return;
                 }
                 Ok(Some(m)) => {
@@ -301,6 +333,8 @@ impl Overseer {
         }
         loop {
             let resume = self.get_resumable_task();
+            tracing::warn!(" -> resuming task {}", resume.task_id);
+            self.tasks.get_mut(&resume.task_id).unwrap().state = TaskState::Running;
             resume.resume.send(()).expect("Failed to resume a task");
             let mut should_resume_again = false;
             if resume.maybe_lock {
@@ -335,12 +369,28 @@ impl Overseer {
         }
     }
 
+    fn should_resume(&self) -> bool {
+        !self.tasks.values().any(|t| t.state == TaskState::Running)
+    }
+
     async fn run(&mut self) {
         while let Some(m) = self.receiver.recv().await {
+            tracing::warn!(
+                "got message {m:?} locked_in_maybe = {:?} skip_next_resume = {:?} tasks = {:?}",
+                self.tasks_locked_in_maybe,
+                self.skip_next_resume,
+                self.tasks
+            );
             let should_resume = self.handle_message(m);
-            if should_resume {
+            tracing::warn!(" -> should_resume = {should_resume} locked_in_maybe = {:?} skip_next_resume = {:?} tasks = {:?}",
+                self.tasks_locked_in_maybe,
+                self.skip_next_resume,
+                self.tasks);
+            if self.should_resume() {
+                tracing::warn!(" -> resuming a task");
                 let test_over = self.do_resume().await;
                 if test_over {
+                    tracing::warn!(" -> test is over {:#?}", self);
                     assert!(self.tasks.is_empty());
                     return;
                 }

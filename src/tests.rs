@@ -1,3 +1,7 @@
+use futures::future::join_all;
+use rand::{rngs::StdRng, Rng, SeedableRng};
+use tokio::sync::Mutex;
+
 use crate as reord;
 use std::{
     sync::{
@@ -60,7 +64,7 @@ async fn basic_failing_test() {
 async fn check_failing_locks() {
     reord::init_test(reord::Config {
         check_named_locks_work_for: Some(Duration::from_secs(1)),
-        ..reord::Config::from_seed(Default::default())
+        ..reord::Config::from_seed(2)
     })
     .await;
 
@@ -406,5 +410,44 @@ async fn join_does_not_deadlock() {
     let (a, b, h) = tokio::join!(a, b, h);
     a.unwrap();
     b.unwrap();
+    h.unwrap();
+}
+
+#[tokio::test]
+async fn maybe_lock_smoke_test() {
+    tracing_subscriber::FmtSubscriber::builder()
+        .with_max_level(tracing::Level::TRACE)
+        .init();
+
+    let cfg = reord::Config::from_seed(0);
+    let mut rng = StdRng::seed_from_u64(cfg.seed);
+    reord::init_test(cfg).await;
+
+    let the_lock = Arc::new(Mutex::new(()));
+
+    const NUM_TASKS: usize = 2;
+    let do_lock_it = (0..NUM_TASKS).map(|_| rng.gen::<bool>());
+    let tasks = do_lock_it
+        .map(|do_lock_it| {
+            tokio::task::spawn(reord::new_task({
+                let the_lock = the_lock.clone();
+                async move {
+                    reord::maybe_lock().await;
+                    if do_lock_it {
+                        let _lock = the_lock.lock().await;
+                        reord::point().await;
+                    } else {
+                        reord::point().await;
+                    }
+                }
+            }))
+        })
+        .collect::<Vec<_>>();
+
+    let h = reord::start(NUM_TASKS).await;
+    let (results, h) = tokio::join!(join_all(tasks), h);
+    for r in results {
+        r.unwrap();
+    }
     h.unwrap();
 }
