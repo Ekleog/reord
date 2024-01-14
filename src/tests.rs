@@ -94,6 +94,10 @@ async fn check_failing_locks() {
 
 #[tokio::test]
 async fn check_passing_locks() {
+    tracing_subscriber::FmtSubscriber::builder()
+        .with_max_level(tracing::Level::TRACE)
+        .init();
+
     reord::init_test(reord::Config {
         check_named_locks_work_for: Some(Duration::from_secs(1)),
         ..reord::Config::from_seed(Default::default())
@@ -135,12 +139,9 @@ async fn check_passing_locks() {
 
 #[tokio::test]
 async fn detect_deadlock() {
-    tracing::subscriber::set_global_default(
-        tracing_subscriber::FmtSubscriber::builder()
-            .with_max_level(tracing::Level::TRACE)
-            .finish(),
-    )
-    .unwrap();
+    tracing_subscriber::FmtSubscriber::builder()
+        .with_max_level(tracing::Level::TRACE)
+        .init();
 
     reord::init_test(reord::Config {
         check_addressed_locks_work_for: Some(Duration::from_secs(1)),
@@ -195,12 +196,9 @@ async fn lock_LUL_vs_L_deadlocked() {
     // - B takes lock 1. Reord lets B go for it in order to check that B doesn't progress. It works fine, reord continues.
     // - A releases lock 1. This should give the lock to B, but here reord was then counting the lock as being entirely free.
     // - A takes lock 1. This should be prevented by reord, but reord mistakenly thought that lock 1 was free. Ergo, deadlock.
-    tracing::subscriber::set_global_default(
-        tracing_subscriber::FmtSubscriber::builder()
-            .with_max_level(tracing::Level::TRACE)
-            .finish(),
-    )
-    .unwrap();
+    tracing_subscriber::FmtSubscriber::builder()
+        .with_max_level(tracing::Level::TRACE)
+        .init();
 
     reord::init_test(reord::Config {
         check_addressed_locks_work_for: Some(Duration::from_secs(1)),

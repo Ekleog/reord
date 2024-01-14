@@ -22,6 +22,9 @@ pub struct Config {
     /// reproducible.
     pub seed: u64,
 
+    /// Timeout after which a [`maybe_lock`] will be considered as having blocked on the lock
+    pub maybe_lock_timeout: Duration,
+
     /// If set to `Some`, will allow two tasks to voluntarily collide on a named lock to validate
     /// that locking is implemented correctly. It will then wait for the time indicated by this
     /// setting, and if the next `reord::point` has not been reached by then, assume the locking
@@ -41,6 +44,7 @@ impl Config {
         use rand::Rng;
         Config {
             seed: rand::thread_rng().gen(),
+            maybe_lock_timeout: Duration::from_millis(200),
             check_addressed_locks_work_for: None,
             check_named_locks_work_for: None,
         }
@@ -50,6 +54,7 @@ impl Config {
     pub fn from_seed(seed: u64) -> Config {
         Config {
             seed,
+            maybe_lock_timeout: Duration::from_millis(200),
             check_addressed_locks_work_for: None,
             check_named_locks_work_for: None,
         }
@@ -105,6 +110,31 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
 pub async fn point() {
     #[cfg(feature = "test")]
     real::point().await
+}
+
+/// Potential lock-taking activity happening, that is impossible to encode with [`Lock`]
+///
+/// This should not be used if you can exactly define the locking behavior with [`Lock`], as it incurs
+/// a heavy performance penalty: each time `reord` will hit this point, it will continue assuming there
+/// is no lock, and then if nothing happens during the time configured in [`Config`], it will assume
+/// that a lock was actually taken and start running another task.
+///
+/// For these reasons, if using this, you should:
+/// - Make sure this is just before the potentially-lock-taking operation
+/// - Make sure you have a [`point()`] call just after the potentially-lock-taking operation
+/// - Make sure the lock-taking operation itself cannot be a source of non-determinism, as `reord`
+///   will run multiple of them in parallel when the lock is released, until they reach the next [`point`]
+/// - Make sure you do not have a panic or error that'd make code escape between the [`maybe_lock`]
+///   and its associated [`point`], to stay reproducible
+/// - Use this as sparsely as possible
+///
+/// Unfortunately, there are circumstances that force the use of `maybe_lock`. For example, postgresql
+/// database access take locks that live for the lifetime of the transaction, that are basically impossible
+/// to guess or otherwise encode in a clean locking format.
+#[inline]
+pub async fn maybe_lock() {
+    #[cfg(feature = "test")]
+    real::maybe_lock().await
 }
 
 /// Lock information
