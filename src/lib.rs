@@ -40,6 +40,9 @@ pub struct Config {
 
 impl Config {
     /// Generate a configuration with the default parameters and a random seed
+    ///
+    /// If you are running under a fuzzer, you should have the fuzzer generate your seed and pass
+    /// it to [`Config::from_seed`].
     pub fn with_random_seed() -> Config {
         use rand::Rng;
         let seed = rand::thread_rng().gen();

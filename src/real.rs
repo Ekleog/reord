@@ -376,7 +376,10 @@ pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
     let task_fut = TASK_ID.scope(task_id, async move {
         if SENDER.read().unwrap().is_none() {
             #[cfg(feature = "tracing")]
-            tracing::warn!(tid = TASK_ID.get(), "running with reord disabled, but the `tracing` feature is set");
+            tracing::warn!(
+                tid = TASK_ID.get(),
+                "running with reord disabled, but the `tracing` feature is set"
+            );
             return f.await;
         }
 
