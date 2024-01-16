@@ -2,7 +2,7 @@ use crate::{Config, LockInfo};
 use futures::FutureExt;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     ops::RangeBounds,
     sync::{
@@ -118,8 +118,8 @@ impl Task {
 
 #[derive(Debug)]
 struct Overseer {
+    peeked_messages: VecDeque<Message>,
     receiver: mpsc::UnboundedReceiver<Message>,
-    sender: mpsc::UnboundedSender<Message>,
     cfg: Config,
     rng: StdRng,
     // Invariant: only one task has state BlockedOn at a time, to avoid issues with not knowing
@@ -134,8 +134,8 @@ impl Overseer {
         initial_tasks: Vec<StopPoint>,
     ) -> Overseer {
         Overseer {
+            peeked_messages: VecDeque::new(),
             receiver,
-            sender: SENDER.read().unwrap().clone().unwrap(),
 
             rng: StdRng::seed_from_u64(cfg.seed),
             cfg,
@@ -241,7 +241,6 @@ impl Overseer {
         check_for: Duration,
     ) -> bool {
         let deadline = Instant::now() + check_for;
-        let mut messages_to_push_back = Vec::new();
         let res = loop {
             match tokio::time::timeout_at(deadline, self.receiver.recv()).await {
                 Err(_) => {
@@ -251,7 +250,7 @@ impl Overseer {
                 Ok(Some(m)) => {
                     // received a message, re-enqueue it before continuing
                     let task_id = m.task_id();
-                    messages_to_push_back.push(m);
+                    self.peeked_messages.push_back(m);
                     if tasks.contains(&task_id) {
                         break false;
                     }
@@ -259,9 +258,6 @@ impl Overseer {
                 Ok(None) => unreachable!(),
             }
         };
-        for m in messages_to_push_back {
-            self.sender.send(m).unwrap();
-        }
         res
     }
 
@@ -342,9 +338,16 @@ impl Overseer {
             .any(|t| matches!(t.state, TaskState::Running))
     }
 
+    async fn next_message(&mut self) -> Option<Message> {
+        if !self.peeked_messages.is_empty() {
+            return self.peeked_messages.pop_front();
+        }
+        self.receiver.recv().await
+    }
+
     async fn run(&mut self) {
         self.resume_one().await; // Start the system
-        while let Some(m) = self.receiver.recv().await {
+        while let Some(m) = self.next_message().await {
             self.handle_message(m);
             if self.tasks.is_empty() {
                 return;
