@@ -30,6 +30,8 @@ One thing to note is, `reord` will run only a single task at a time. So if you t
 
 `reord` also supports checking that your locks actually do lock what you're expecting them to lock. Again, this might be useful if you do not trust your lock implementation (or the external locks you are using), or the way you instrumented your locks with `reord`. To do this, you should set the appropriate configuration options.
 
+In all cases, you should try to set a `reord::point` just after any lock-taking activity, so that `reord` can efficiently perform the checking. However, you do not have to make your code ugly for that reason until you get spurious test failures from `reord`: the worst thing that could happen with missing such a `reord::point` would be `reord` spuriously thinking that a lock worked while it did not, or that a task is blocked while it is still making progress. In all cases, it will just make tests slightly harder to reproduce, but they will still stay much easier to reproduce than without `reord` at all. So, until you feel a practical need of it, you probably should not instrument the `?` calls in your lock-taking activities.
+
 Note however that checking locks, as well as fuzzy locks, imply waiting for some delay before making progress. Hence, try doing that as sparsely as possible, as it will make your tests (or, more importantly, your fuzzers) run way slower whenever there is actually lock contention.
 
 Finally, when you need to debug a failing test, you can take:
