@@ -4,8 +4,9 @@ use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
+    ops::RangeBounds,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
         Mutex, RwLock,
     },
     time::Duration,
@@ -15,53 +16,24 @@ use tokio::{
     time::Instant,
 };
 
-impl Config {
-    fn can_resume(
-        &self,
-        s: &StopPoint,
-        locks: &HashSet<LockInfo>,
-        has_blocked_task_waiting: bool,
-    ) -> bool {
-        for l in s.locks_about_to_be_acquired.iter() {
-            match l {
-                l if !locks.contains(l) => (),
-                _ if has_blocked_task_waiting => return false,
-                LockInfo::Addressed(_) if self.check_addressed_locks_work_for.is_some() => (),
-                LockInfo::Named(_) if self.check_named_locks_work_for.is_some() => (),
-                _ => return false,
-            }
-        }
-        true
-    }
-
-    fn lock_check_time(&self, l: &[LockInfo], locks: &HashSet<LockInfo>) -> Option<Duration> {
-        let mut locks_addressed = false;
-        let mut locks_named = false;
-        for l in l {
-            match l {
-                l if !locks.contains(l) => (),
-                LockInfo::Addressed(_) => locks_addressed = true,
-                LockInfo::Named(_) => locks_named = true,
-            }
-        }
-        match (locks_addressed, locks_named) {
-            (false, false) => None,
-            (true, false) => Some(self.check_addressed_locks_work_for.unwrap()),
-            (false, true) => Some(self.check_named_locks_work_for.unwrap()),
-            (true, true) => Some(std::cmp::max(
-                self.check_addressed_locks_work_for.unwrap(),
-                self.check_named_locks_work_for.unwrap(),
-            )),
-        }
-    }
-}
-
-#[derive(Debug)]
 struct StopPoint {
-    task_id: usize,
+    task_id: u64,
     resume: oneshot::Sender<()>,
     maybe_lock: bool,
     locks_about_to_be_acquired: Vec<LockInfo>,
+}
+
+impl std::fmt::Debug for StopPoint {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("StopPoint")
+            .field("task_id", &self.task_id)
+            .field("maybe_lock", &self.maybe_lock)
+            .field(
+                "locks_about_to_be_acquired",
+                &self.locks_about_to_be_acquired,
+            )
+            .finish()
+    }
 }
 
 impl StopPoint {
@@ -99,47 +71,47 @@ impl StopPoint {
 #[derive(Debug)]
 enum Message {
     NewTask(StopPoint),
-    Start,
     Stop(StopPoint),
-    Unlock(usize, LockInfo),
-    TaskEnd(usize),
+    Unlock(u64, LockInfo),
+    TaskEnd(u64),
 }
 
 impl Message {
-    fn task_id(&self) -> usize {
+    fn task_id(&self) -> u64 {
         match self {
             Message::NewTask(p) | Message::Stop(p) => p.task_id,
-            Message::TaskEnd(t) => *t,
-            Message::Unlock(t, _) => *t,
-            Message::Start => panic!("Called task_id on Message::Start"),
+            Message::Unlock(t, _) | Message::TaskEnd(t) => *t,
         }
     }
 }
 
 static SENDER: RwLock<Option<mpsc::UnboundedSender<Message>>> = RwLock::new(None);
 static OVERSEER: Mutex<Option<(Config, mpsc::UnboundedReceiver<Message>)>> = Mutex::new(None);
-static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
+static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 tokio::task_local! {
-    static TASK_ID: usize;
+    static TASK_ID: u64;
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 enum TaskState {
     Running,
-    Blocked,
-    Waiting,
+    BlockedOn(HashSet<LockInfo>),
+    BlockedOnMaybe,
+    Waiting(StopPoint),
 }
 
 #[derive(Debug)]
 struct Task {
     state: TaskState,
+    owned_locks: HashSet<LockInfo>,
 }
 
 impl Task {
-    fn new() -> Task {
+    fn new(stop: StopPoint) -> Task {
         Task {
-            state: TaskState::Waiting,
+            state: TaskState::Waiting(stop),
+            owned_locks: HashSet::new(),
         }
     }
 }
@@ -150,17 +122,17 @@ struct Overseer {
     sender: mpsc::UnboundedSender<Message>,
     cfg: Config,
     rng: StdRng,
-    tasks: HashMap<usize, Task>,
-    locks: HashSet<LockInfo>,
-    pending_stops: Vec<StopPoint>,
-    blocked_task: Option<usize>,
-    blocked_task_waiting_on: HashSet<LockInfo>,
-    tasks_locked_in_maybe: HashSet<usize>,
-    skip_next_resume: bool,
+    // Invariant: only one task has state BlockedOn at a time, to avoid issues with not knowing
+    // which task got the lock after an unlock
+    tasks: HashMap<u64, Task>,
 }
 
 impl Overseer {
-    fn new(cfg: Config, receiver: mpsc::UnboundedReceiver<Message>) -> Overseer {
+    fn new(
+        cfg: Config,
+        receiver: mpsc::UnboundedReceiver<Message>,
+        initial_tasks: Vec<StopPoint>,
+    ) -> Overseer {
         Overseer {
             receiver,
             sender: SENDER.read().unwrap().clone().unwrap(),
@@ -168,231 +140,218 @@ impl Overseer {
             rng: StdRng::seed_from_u64(cfg.seed),
             cfg,
 
-            tasks: HashMap::new(),
-            locks: HashSet::new(),
-            pending_stops: Vec::new(),
-            blocked_task: None,
-            blocked_task_waiting_on: HashSet::new(),
-            tasks_locked_in_maybe: HashSet::new(),
-            skip_next_resume: false,
+            tasks: initial_tasks
+                .into_iter()
+                .map(|p| (p.task_id, Task::new(p)))
+                .collect(),
         }
     }
 
-    // Returns true iff we should resume a task after this message
-    fn handle_message(&mut self, m: Message) -> bool {
+    fn handle_message(&mut self, m: Message) {
         match m {
-            Message::Start => true,
             Message::TaskEnd(t) => {
+                let remaining_locks = &self.tasks.get(&t).unwrap().owned_locks;
+                assert!(remaining_locks.is_empty(), "Task completed without releasing all its locks: it still had {remaining_locks:?}");
                 self.tasks.remove(&t);
-                true
             }
-            Message::Unlock(_, l) => {
-                if self.blocked_task_waiting_on.is_empty() {
-                    // There's no blocked task. Simple path.
-                    self.locks.remove(&l);
-                } else {
-                    // There's a blocked task. Hard path.
-                    // If there's already a task blocked on this lock, give the lock to the task
-                    // If not, release the lock normally
-                    if !self.blocked_task_waiting_on.remove(&l) {
-                        self.locks.remove(&l);
+            Message::Unlock(t, l) => {
+                self.tasks.get_mut(&t).unwrap().owned_locks.remove(&l);
+                for t in self.tasks.values_mut() {
+                    if let TaskState::BlockedOn(locks) = &mut t.state {
+                        if locks.remove(&l) {
+                            t.owned_locks.insert(l);
+                            t.state = TaskState::Running;
+                            break;
+                        }
                     }
-                    // Skip the next resume if this unblocked the blocked task
-                    self.skip_next_resume = self.blocked_task_waiting_on.is_empty();
-                    self.tasks
-                        .get_mut(&self.blocked_task.take().unwrap())
-                        .unwrap()
-                        .state = TaskState::Running;
                 }
-                false
             }
             Message::NewTask(p) => {
-                self.tasks.insert(p.task_id, Task::new());
-                self.pending_stops.push(p);
-                false
+                self.tasks.insert(p.task_id, Task::new(p));
             }
             Message::Stop(p) => {
-                let task_id = p.task_id;
-                self.tasks.get_mut(&task_id).unwrap().state = TaskState::Blocked;
-                self.pending_stops.push(p);
-                if self.tasks_locked_in_maybe.remove(&task_id) {
-                    // The task was blocked in a "maybe_lock". Do not resume anything.
-                    self.tasks.get_mut(&task_id).unwrap().state = TaskState::Waiting;
-                    return false;
-                }
-                true
+                let task = self.tasks.get_mut(&p.task_id).unwrap();
+                task.state = TaskState::Waiting(p);
             }
         }
     }
 
-    fn get_resumable_task(&mut self) -> StopPoint {
-        let resumable_stop_idxs = (0..self.pending_stops.len())
-            .filter(|s| {
-                self.cfg.can_resume(
-                    &self.pending_stops[*s],
-                    &self.locks,
-                    !self.blocked_task_waiting_on.is_empty(),
-                )
+    fn is_already_locked(&self, l: &LockInfo) -> bool {
+        self.tasks.values().any(|t| t.owned_locks.contains(l))
+    }
+
+    fn conflicting_locks_for(
+        &self,
+        locks_about_to_be_acquired: &Vec<LockInfo>,
+    ) -> HashSet<LockInfo> {
+        locks_about_to_be_acquired
+            .iter()
+            .filter(|l| self.is_already_locked(l))
+            .cloned()
+            .collect()
+    }
+
+    fn has_task_blocked_on_locks(&self) -> bool {
+        self.tasks
+            .values()
+            .any(|t| matches!(t.state, TaskState::BlockedOn(_)))
+    }
+
+    /// Returns either a duration for which to check the locks, or None if it's not something we're configured to do
+    fn time_to_check_locks(&self, locks: &HashSet<LockInfo>) -> Option<Duration> {
+        let mut res = Duration::from_millis(0);
+        for l in locks {
+            match l {
+                LockInfo::Addressed(_) => {
+                    res = std::cmp::max(res, self.cfg.check_addressed_locks_work_for?)
+                }
+                LockInfo::Named(_) => {
+                    res = std::cmp::max(res, self.cfg.check_named_locks_work_for?)
+                }
+            }
+        }
+        Some(res)
+    }
+
+    fn can_resume(&self, p: &StopPoint) -> bool {
+        let conflicting_locks = self.conflicting_locks_for(&p.locks_about_to_be_acquired);
+        conflicting_locks.is_empty()
+            || (!self.has_task_blocked_on_locks()
+                && self.time_to_check_locks(&conflicting_locks).is_some())
+    }
+
+    /// Returns `None` iff there is currently no resumable task
+    fn get_resumable_task(&mut self) -> Option<u64> {
+        let mut resumable_idxs = self
+            .tasks
+            .iter()
+            .filter_map(|(t, s)| match &s.state {
+                TaskState::Waiting(p) if self.can_resume(p) => Some(*t),
+                _ => None,
             })
             .collect::<Vec<_>>();
-        let resume_idx = resumable_stop_idxs
-            .choose(&mut self.rng)
-            .expect("Deadlock detected!");
-        let resume = self.pending_stops.swap_remove(*resume_idx);
-        #[cfg(feature = "tracing")]
-        if self
-            .cfg
-            .lock_check_time(&resume.locks_about_to_be_acquired, &self.locks)
-            .is_some()
-        {
-            tracing::debug!(
-                new_locks=?resume.locks_about_to_be_acquired,
-                already_locked=?self.locks,
-                "tentatively resuming a task to validate it does not make progress"
-            )
-        }
-        resume
+        resumable_idxs.sort(); // make sure we're reproducible and not dependent on hashmap iteration order
+        resumable_idxs.choose(&mut self.rng).copied()
     }
 
-    // Return true iff we should resume another task after this
-    async fn just_resumed_maybe_lock(&mut self, task_id: usize) -> bool {
-        let deadline = Instant::now() + self.cfg.maybe_lock_timeout;
-        let mut should_resume_after = false;
-        tracing::warn!("   (just resumed maybe_lock)");
-        loop {
-            match tokio::time::timeout_at(deadline, self.receiver.recv()).await {
-                Err(_) => {
-                    // reached timeout
-                    self.tasks_locked_in_maybe.insert(task_id);
-                    self.tasks.get_mut(&task_id).unwrap().state = TaskState::Blocked;
-                    return true;
-                }
-                Ok(Some(m)) => {
-                    if m.task_id() == task_id {
-                        // continued and reached stop point
-                        self.sender.send(m).unwrap();
-                        return should_resume_after; // will resume when handling `m`
-                    } else {
-                        // Never resume a task here
-                        should_resume_after |= self.handle_message(m);
-                    }
-                }
-                Ok(None) => unreachable!(),
-            }
-        }
-    }
-
-    // Panics if the deadlock check was unsuccessful
-    async fn just_resumed_for_deadlock_check(
+    // Returns true iff there is no new message from a task in range `tasks` for `check_for` time
+    async fn check_if_task_is_blocked(
         &mut self,
-        task_id: usize,
+        tasks: impl RangeBounds<u64>,
         check_for: Duration,
-        locks: &[LockInfo],
-        conflicting_locks: HashSet<LockInfo>,
-    ) {
+    ) -> bool {
         let deadline = Instant::now() + check_for;
-        loop {
+        let mut messages_to_push_back = Vec::new();
+        let res = loop {
             match tokio::time::timeout_at(deadline, self.receiver.recv()).await {
                 Err(_) => {
                     // reached timeout
-                    self.blocked_task_waiting_on = conflicting_locks;
-                    self.blocked_task = Some(task_id);
-                    return;
+                    break true;
                 }
                 Ok(Some(m)) => {
-                    if m.task_id() == task_id {
-                        panic!("Locks {locks:?} did not actually prevent the task from executing when it should have been blocked")
-                    } else {
-                        // Never resume a task here
-                        self.handle_message(m);
+                    // received a message, re-enqueue it before continuing
+                    let task_id = m.task_id();
+                    messages_to_push_back.push(m);
+                    if tasks.contains(&task_id) {
+                        break false;
                     }
                 }
                 Ok(None) => unreachable!(),
             }
+        };
+        for m in messages_to_push_back {
+            self.sender.send(m).unwrap();
         }
+        res
     }
 
-    // Returns true iff the test is over
-    async fn do_resume(&mut self) -> bool {
-        if self.skip_next_resume {
-            self.skip_next_resume = false;
-            return false;
-        }
-        if self.pending_stops.is_empty() {
-            if self.blocked_task_waiting_on.is_empty() && self.tasks_locked_in_maybe.is_empty() {
-                return true;
+    /// Returns true iff we NEED to handle a message RIGHT NOW
+    async fn resume_one(&mut self) -> bool {
+        let Some(t) = self.get_resumable_task() else {
+            // This can happen if the only remaining tasks are all BlockedOnMaybe. Try waiting a bit
+            // before confirming the deadlock. Task ID 0 does not
+            if self
+                .check_if_task_is_blocked(.., self.cfg.maybe_lock_timeout)
+                .await
+            {
+                panic!("Deadlock detected! Task states are {:#?}", self.tasks);
+            } else {
+                return true; // try again
             }
-            // Some tasks are currently blocked, wait for them
-            match tokio::time::timeout(Duration::from_secs(10), self.receiver.recv()).await {
-                Err(_) => panic!("10 seconds elapsed without blocked tasks making progress"),
-                Ok(m) => {
-                    self.sender.send(m.unwrap()).unwrap();
-                    return false;
+        };
+        let TaskState::Waiting(p) = std::mem::replace(
+            &mut self.tasks.get_mut(&t).unwrap().state,
+            TaskState::Running,
+        ) else {
+            unreachable!();
+        };
+        p.resume.send(()).unwrap();
+        if p.maybe_lock {
+            assert!(p.locks_about_to_be_acquired.is_empty());
+            if self
+                .check_if_task_is_blocked(p.task_id..=p.task_id, self.cfg.maybe_lock_timeout)
+                .await
+            {
+                self.tasks.get_mut(&t).unwrap().state = TaskState::BlockedOnMaybe;
+            }
+        }
+        if !p.locks_about_to_be_acquired.is_empty() {
+            let conflicting_locks = self.conflicting_locks_for(&p.locks_about_to_be_acquired);
+            if conflicting_locks.is_empty() {
+                self.tasks
+                    .get_mut(&t)
+                    .unwrap()
+                    .owned_locks
+                    .extend(p.locks_about_to_be_acquired.into_iter());
+            } else {
+                // There were conflicting locks, we need ot check everything
+                let check_locks_for = self.time_to_check_locks(&conflicting_locks).unwrap();
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    ?conflicting_locks,
+                    "tentatively resuming a task to validate it does not make progress"
+                );
+                if self
+                    .check_if_task_is_blocked(p.task_id..=p.task_id, check_locks_for)
+                    .await
+                {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(
+                        ?conflicting_locks,
+                        "task successfully did not make any progress"
+                    );
+                    let task = self.tasks.get_mut(&t).unwrap();
+                    task.owned_locks.extend(
+                        p.locks_about_to_be_acquired
+                            .into_iter()
+                            .filter(|l| !conflicting_locks.contains(&l)),
+                    );
+                    task.state = TaskState::BlockedOn(conflicting_locks);
+                } else {
+                    panic!("Locks that should have blocked let the task go through: {conflicting_locks:?}");
                 }
             }
         }
-        loop {
-            let resume = self.get_resumable_task();
-            tracing::warn!(" -> resuming task {}", resume.task_id);
-            self.tasks.get_mut(&resume.task_id).unwrap().state = TaskState::Running;
-            resume.resume.send(()).expect("Failed to resume a task");
-            let mut should_resume_again = false;
-            if resume.maybe_lock {
-                should_resume_again |= self.just_resumed_maybe_lock(resume.task_id).await;
-            }
-            if !resume.locks_about_to_be_acquired.is_empty() {
-                let lock_check_time = self
-                    .cfg
-                    .lock_check_time(&resume.locks_about_to_be_acquired, &self.locks);
-                let conflicting_locks = resume
-                    .locks_about_to_be_acquired
-                    .iter()
-                    .filter(|l| self.locks.contains(&l))
-                    .cloned()
-                    .collect();
-                self.locks
-                    .extend(resume.locks_about_to_be_acquired.iter().cloned());
-                if let Some(lock_check_time) = lock_check_time {
-                    self.just_resumed_for_deadlock_check(
-                        resume.task_id,
-                        lock_check_time,
-                        &resume.locks_about_to_be_acquired,
-                        conflicting_locks,
-                    )
-                    .await;
-                    should_resume_again = true;
-                }
-            }
-            if !should_resume_again {
-                return false;
-            }
-        }
+        false
     }
 
     fn should_resume(&self) -> bool {
-        !self.tasks.values().any(|t| t.state == TaskState::Running)
+        !self
+            .tasks
+            .values()
+            .any(|t| matches!(t.state, TaskState::Running))
     }
 
     async fn run(&mut self) {
+        self.resume_one().await; // Start the system
         while let Some(m) = self.receiver.recv().await {
-            tracing::warn!(
-                "got message {m:?} locked_in_maybe = {:?} skip_next_resume = {:?} tasks = {:?}",
-                self.tasks_locked_in_maybe,
-                self.skip_next_resume,
-                self.tasks
-            );
-            let should_resume = self.handle_message(m);
-            tracing::warn!(" -> should_resume = {should_resume} locked_in_maybe = {:?} skip_next_resume = {:?} tasks = {:?}",
-                self.tasks_locked_in_maybe,
-                self.skip_next_resume,
-                self.tasks);
-            if self.should_resume() {
-                tracing::warn!(" -> resuming a task");
-                let test_over = self.do_resume().await;
-                if test_over {
-                    tracing::warn!(" -> test is over {:#?}", self);
-                    assert!(self.tasks.is_empty());
-                    return;
+            self.handle_message(m);
+            if self.tasks.is_empty() {
+                return;
+            }
+            while self.should_resume() {
+                if self.resume_one().await {
+                    break;
                 }
             }
         }
@@ -402,7 +361,7 @@ impl Overseer {
 pub async fn init_test(cfg: Config) {
     let (s, r) = mpsc::unbounded_channel();
     if let Some(s) = SENDER.write().unwrap().replace(s) {
-        if !s.send(Message::Start).is_err() {
+        if !s.send(Message::TaskEnd(0)).is_err() {
             panic!("Initializing a new test while the old test was still running! Note that `reord` is only designed to work with `cargo-nextest`.");
         }
     }
@@ -413,10 +372,11 @@ pub async fn init_test(cfg: Config) {
 
 pub async fn new_task<T>(f: impl Future<Output = T>) -> T {
     let task_id = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
+    assert!(task_id > 0, "Task ID wraparound detected");
     let task_fut = TASK_ID.scope(task_id, async move {
         if SENDER.read().unwrap().is_none() {
             #[cfg(feature = "tracing")]
-            tracing::trace!(tid = TASK_ID.get(), "running with reord disabled");
+            tracing::warn!(tid = TASK_ID.get(), "running with reord disabled, but the `tracing` feature is set");
             return f.await;
         }
 
@@ -473,21 +433,7 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
         }
     }
 
-    let sender_lock = SENDER.read().unwrap();
-    let sender = sender_lock
-        .as_ref()
-        .expect("Called `start` without `init_test` having run before.");
-    for s in new_tasks {
-        sender
-            .send(Message::NewTask(s))
-            .expect("re-submitting the new tasks message");
-    }
-    sender
-        .send(Message::Start)
-        .expect("submitting start message");
-    std::mem::drop(sender_lock);
-
-    tokio::task::spawn(async move { Overseer::new(cfg, receiver).run().await })
+    tokio::task::spawn(async move { Overseer::new(cfg, receiver, new_tasks).run().await })
 }
 
 pub async fn point() {

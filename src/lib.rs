@@ -46,7 +46,7 @@ impl Config {
         eprintln!("Running `reord` test with random seed {:?}", seed);
         Config {
             seed,
-            maybe_lock_timeout: Duration::from_millis(200),
+            maybe_lock_timeout: Duration::from_millis(100),
             check_addressed_locks_work_for: None,
             check_named_locks_work_for: None,
         }
@@ -56,7 +56,7 @@ impl Config {
     pub fn from_seed(seed: u64) -> Config {
         Config {
             seed,
-            maybe_lock_timeout: Duration::from_millis(200),
+            maybe_lock_timeout: Duration::from_millis(100),
             check_addressed_locks_work_for: None,
             check_named_locks_work_for: None,
         }

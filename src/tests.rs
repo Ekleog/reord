@@ -62,9 +62,13 @@ async fn basic_failing_test() {
 
 #[tokio::test]
 async fn check_failing_locks() {
+    tracing_subscriber::FmtSubscriber::builder()
+        .with_max_level(tracing::Level::TRACE)
+        .init();
+
     reord::init_test(reord::Config {
         check_named_locks_work_for: Some(Duration::from_secs(1)),
-        ..reord::Config::from_seed(2)
+        ..reord::Config::from_seed(0)
     })
     .await;
 
@@ -74,9 +78,14 @@ async fn check_failing_locks() {
             let _l = reord::Lock::take_named(String::from("foo")).await;
             println!("in lock 1");
             reord::point().await;
+            reord::point().await;
+            reord::point().await;
+            reord::point().await;
+            reord::point().await;
+            reord::point().await;
         }
-        reord::point().await;
         println!("after lock 1");
+        reord::point().await;
     }));
 
     let b = tokio::task::spawn(reord::new_task(async move {
@@ -85,9 +94,15 @@ async fn check_failing_locks() {
             let _l = reord::Lock::take_named(String::from("foo")).await;
             println!("in lock 2");
             reord::point().await;
+            reord::point().await;
+            reord::point().await;
+            reord::point().await;
+            reord::point().await;
+            reord::point().await;
+            reord::point().await;
         }
-        reord::point().await;
         println!("after lock 2");
+        reord::point().await;
     }));
 
     let h = reord::start(2).await;
@@ -149,7 +164,7 @@ async fn detect_deadlock() {
 
     reord::init_test(reord::Config {
         check_addressed_locks_work_for: Some(Duration::from_secs(1)),
-        ..reord::Config::from_seed(Default::default())
+        ..reord::Config::from_seed(0)
     })
     .await;
 
@@ -162,6 +177,9 @@ async fn detect_deadlock() {
             println!("A taking lock 1");
             let _l = reord::Lock::take_addressed(1).await;
             let _l = lock1.lock().await;
+            reord::point().await;
+            reord::point().await;
+            reord::point().await;
             reord::point().await;
             eprintln!("A taking lock 2");
             let _l = reord::Lock::take_addressed(2).await;
@@ -177,6 +195,9 @@ async fn detect_deadlock() {
             println!("B taking lock 2");
             let _l = reord::Lock::take_addressed(2).await;
             let _l = lock2_clone.lock().await;
+            reord::point().await;
+            reord::point().await;
+            reord::point().await;
             reord::point().await;
             eprintln!("B taking lock 1");
             let _l = reord::Lock::take_addressed(1).await;
@@ -425,7 +446,7 @@ async fn maybe_lock_smoke_test() {
 
     let the_lock = Arc::new(Mutex::new(()));
 
-    const NUM_TASKS: usize = 2;
+    const NUM_TASKS: usize = 32;
     let do_lock_it = (0..NUM_TASKS).map(|_| rng.gen::<bool>());
     let tasks = do_lock_it
         .map(|do_lock_it| {
@@ -434,9 +455,12 @@ async fn maybe_lock_smoke_test() {
                 async move {
                     reord::maybe_lock().await;
                     if do_lock_it {
+                        tracing::info!("taking the lock");
                         let _lock = the_lock.lock().await;
+                        tracing::info!("taken the lock");
                         reord::point().await;
                     } else {
+                        tracing::info!("skipping the lock");
                         reord::point().await;
                     }
                 }
