@@ -443,7 +443,7 @@ pub async fn start(tasks: usize) -> tokio::task::JoinHandle<()> {
 }
 
 pub async fn point() {
-    if SENDER.read().unwrap().is_none() {
+    if TASK_ID.try_with(|_| ()).is_err() || SENDER.read().unwrap().is_none() {
         return;
     }
     let (s, r) = oneshot::channel();
@@ -463,7 +463,7 @@ pub async fn point() {
 }
 
 pub async fn maybe_lock() {
-    if SENDER.read().unwrap().is_none() {
+    if TASK_ID.try_with(|_| ()).is_err() || SENDER.read().unwrap().is_none() {
         return;
     }
     let (s, r) = oneshot::channel();
@@ -497,7 +497,7 @@ impl Lock {
     }
 
     pub async fn take_atomic(l: Vec<LockInfo>) -> Lock {
-        if SENDER.read().unwrap().is_none() {
+        if TASK_ID.try_with(|_| ()).is_err() || SENDER.read().unwrap().is_none() {
             return Lock(l);
         }
         let (resume, wait) = oneshot::channel();
@@ -520,6 +520,9 @@ impl Lock {
 
 impl Drop for Lock {
     fn drop(&mut self) {
+        if TASK_ID.try_with(|_| ()).is_err() || SENDER.read().unwrap().is_none() {
+            return;
+        }
         #[cfg(feature = "tracing")]
         tracing::trace!(locks=?self.0, "releasing locks");
         for l in self.0.iter() {

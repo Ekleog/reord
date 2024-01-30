@@ -381,6 +381,33 @@ async fn functions_without_init_dont_break() {
 }
 
 #[tokio::test]
+async fn functions_without_new_task_dont_break() {
+    reord::init_test(reord::Config::from_seed(0)).await;
+
+    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let lock2 = lock.clone();
+    let a = tokio::task::spawn(async move {
+        {
+            let _l = reord::Lock::take_named(String::from("foo")).await;
+            let _l = lock.lock().await;
+            reord::point().await;
+        }
+        reord::point().await;
+    });
+
+    let b = tokio::task::spawn(async move {
+        {
+            let _l = reord::Lock::take_named(String::from("foo")).await;
+            let _l = lock2.lock().await;
+            reord::point().await;
+        }
+        reord::point().await;
+    });
+
+    tokio::try_join!(a, b).unwrap();
+}
+
+#[tokio::test]
 async fn two_tests_same_thread() {
     // First test
     reord::init_test(reord::Config::with_random_seed()).await;
