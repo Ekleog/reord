@@ -1,6 +1,6 @@
 use crate::{Config, LockInfo};
 use futures::FutureExt;
-use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use rand::{prelude::IndexedRandom, rngs::StdRng, SeedableRng};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,

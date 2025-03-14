@@ -177,10 +177,10 @@ async fn detect_deadlock() {
             println!("A taking lock 1");
             let _l = reord::Lock::take_addressed(1).await;
             let _l = lock1.lock().await;
-            reord::point().await;
-            reord::point().await;
-            reord::point().await;
-            reord::point().await;
+            println!("A successfully taken lock 1");
+            for _ in 0..10 {
+                reord::point().await;
+            }
             eprintln!("A taking lock 2");
             let _l = reord::Lock::take_addressed(2).await;
             let _l = lock2.lock().await;
@@ -195,10 +195,10 @@ async fn detect_deadlock() {
             println!("B taking lock 2");
             let _l = reord::Lock::take_addressed(2).await;
             let _l = lock2_clone.lock().await;
-            reord::point().await;
-            reord::point().await;
-            reord::point().await;
-            reord::point().await;
+            println!("B successfully taken lock 2");
+            for _ in 0..10 {
+                reord::point().await;
+            }
             eprintln!("B taking lock 1");
             let _l = reord::Lock::take_addressed(1).await;
             let _l = lock1_clone.lock().await;
@@ -474,7 +474,7 @@ async fn maybe_lock_smoke_test() {
     let the_lock = Arc::new(Mutex::new(()));
 
     const NUM_TASKS: usize = 32;
-    let do_lock_it = (0..NUM_TASKS).map(|_| rng.gen::<bool>());
+    let do_lock_it = (0..NUM_TASKS).map(|_| rng.random::<bool>());
     let tasks = do_lock_it
         .map(|do_lock_it| {
             tokio::task::spawn(reord::new_task({

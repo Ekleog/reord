@@ -45,7 +45,7 @@ impl Config {
     /// it to [`Config::from_seed`].
     pub fn with_random_seed() -> Config {
         use rand::Rng;
-        let seed = rand::thread_rng().gen();
+        let seed = rand::rng().random();
         eprintln!("Running `reord` test with random seed {:?}", seed);
         Config {
             seed,
